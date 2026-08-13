@@ -1,5 +1,5 @@
 # Step 1: Install required libraries
-!pip install -q dash plotly pandas numpy
+
 
 # Step 2: Import libraries
 import pandas as pd
