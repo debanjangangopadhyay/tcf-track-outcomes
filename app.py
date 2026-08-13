@@ -1,16 +1,11 @@
-# Step 1: Install required libraries
-
-
-# Step 2: Import libraries
 import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, dcc, html, Input, Output
-import random  # Required for the dynamic port fix
 
 # ---------------------------------------------------------
-# Step 3: Simulate the Clinical Trial Data
+# Step 1: Simulate the Clinical Trial Data
 # ---------------------------------------------------------
 
 np.random.seed(42)
@@ -38,10 +33,11 @@ df.loc[ch_targeted, 'VMTB_Matching_Score'] = np.random.uniform(65, 95, sum(ch_ta
 df.loc[ch_targeted, 'PFS_Months'] = np.random.uniform(12, 36, sum(ch_targeted))
 
 # ---------------------------------------------------------
-# Step 4: Build the Standard Dash Application
+# Step 2: Build the Standard Dash Application
 # ---------------------------------------------------------
 
 app = Dash(__name__)
+server = app.server  # Expose the underlying Flask server for Gunicorn
 
 app.layout = html.Div(style={'fontFamily': 'Arial, sans-serif', 'padding': '20px', 'backgroundColor': '#f9f9f9'}, children=[
     
@@ -72,7 +68,7 @@ app.layout = html.Div(style={'fontFamily': 'Arial, sans-serif', 'padding': '20px
 ])
 
 # ---------------------------------------------------------
-# Step 5: Define Callbacks
+# Step 3: Define Callbacks
 # ---------------------------------------------------------
 
 @app.callback(
@@ -122,10 +118,10 @@ def update_charts(selected_cohort):
     return fig_matching, fig_pfs, fig_mrd
 
 # ---------------------------------------------------------
-# Step 6: Run the App with a Dynamic Random Port
+# Step 4: Local Execution
 # ---------------------------------------------------------
 if __name__ == '__main__':
-    # Generates a random port between 8050 and 9050 every time the cell runs.
-    # This prevents Colab from crashing due to a cached/locked background server.
-    dynamic_port = random.randint(8050, 9050)
-    app.run(jupyter_mode='inline', port=dynamic_port, jupyter_height=850)
+    # Standard Flask execution for local testing.
+    # Gunicorn will bypass this block entirely on Render.
+    app.run(debug=True)
+    
