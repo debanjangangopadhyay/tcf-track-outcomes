@@ -1,5 +1,6 @@
-dash==2.14.2
-pandas
+dash
 plotly
+pandas
 numpy
 gunicorn
+scipy
