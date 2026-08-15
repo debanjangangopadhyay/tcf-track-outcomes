@@ -1,4 +1,4 @@
-# Trace-onco Under Development 
+# Trace-onco Under Development (Research Use Only)
 # tcf-track-outcomes
 # Decentralized Genomic Profiling & Clinical Outcomes Dashboard
 
