@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software or methodology in your research, please cite it as below."
+authors:
+  - family-names: "Gangopadhyay"
+    given-names: "Debanjan"
+    orcid: "https://orcid.org/0009-0009-4700-5590"
+title: "Decentralized Genomic Profiling & Clinical Outcomes Dashboard"
+version: 1.0.0
+date-released: 2026-08-15
+url: "https://github.com/debanjangangopadhyay/tcf-track-outcomes"
+repository-code: "https://github.com/debanjangangopadhyay/tcf-track-outcomes"
+abstract: >-
+  A clinical decision support framework and biostatistical dashboard for precision oncology. 
+  Engineered to evaluate Virtual Molecular Tumor Board (VMTB) matching, calculate 
+  progression-free survival (PFS) via Kaplan-Meier estimates and log-rank testing, and 
+  analyze circulating tumor fractions for liquid biopsy monitoring.
+keywords:
+  - precision-oncology
+  - survival-analysis
+  - bioinformatics
+  - clinical-informatics
+  - hepatology
+  - metabolic-medicine
+license: GPL-3.0
