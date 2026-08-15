@@ -5,3 +5,4 @@ matplotlib==3.8.3
 seaborn==0.13.2
 lifelines==0.28.0
 plotly==5.20.0
+scipy==1.13.1
