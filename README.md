@@ -1,8 +1,8 @@
-# Trace-onco (Clinical Decision Support System) Under Development 
+# Trace-onco Under Development 
 # tcf-track-outcomes
 # Decentralized Genomic Profiling & Clinical Outcomes Dashboard
 
-A full-stack clinical decision support and biostatistical web application engineered for precision oncology analytics. This tool bridges the gap between raw clinical-genomic data and actionable survival outcomes, providing rapid insights into therapeutic matching and disease progression.
+A full-stack biostatistical web application engineered for precision oncology analytics. This tool bridges the gap between raw clinical-genomic data and actionable survival outcomes, providing rapid insights into therapeutic matching and disease progression.
 
 🔗 **Live Application:** https://tcf-track-outcomes.onrender.com 
 
