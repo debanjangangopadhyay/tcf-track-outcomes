@@ -40,15 +40,41 @@ def render_download_button(fig, filename_base: str, key: str):
         st.download_button(label="🖼️ Download PNG", data=buf_png.getvalue(), file_name=f"{filename_base}.png", mime="image/png", key=f"png_{key}")
 
 # =========================================================
-# 2. VMTB Clinical Logic Formula (ESCAT + superRCA)
+# 2. Clinical Logic Formulas (ESCAT + VMTB + superRCA)
 # =========================================================
+
+def assign_escat_tier(row):
+    """
+    Dynamically determines the ESCAT Actionability Tier based on TCGA Cohort and Mutations.
+    """
+    kras = str(row.get('KRAS_Mutant', 'No')).strip().title() == 'Yes'
+    tp53 = str(row.get('TP53_Mutant', 'No')).strip().title() == 'Yes'
+    cohort = str(row.get('Cohort', '')).strip().upper()
+    
+    # 1. Evaluate KRAS Actionability
+    if kras:
+        if cohort in ['LUAD', 'LUSC', 'COAD', 'READ']:
+            return 'Tier I'    # FDA Approved Standard of Care
+        elif cohort in ['PAAD', 'CHOL']:
+            return 'Tier II'   # Investigational / Strong evidence
+        else:
+            return 'Tier III'  # Off-label / Basket trial candidate
+            
+    # 2. Evaluate TP53 Actionability
+    if tp53:
+        return 'Tier IV'       # Preclinical / Prognostic only
+        
+    # 3. Default for Wildtype or unmapped variants
+    return 'Tier IV'
+
+
 def calculate_vmtb_score(row):
     """
-    Deterministic VMTB matching score based on ESCAT tiers, 
+    Deterministic VMTB matching score based on computed ESCAT tiers, 
     superRCA ctDNA confidence, and therapeutic administration.
     """
     # 1. ESCAT Evidence Tier Base Score (E_tier)
-    tier = str(row.get('ESCAT_Tier', 'Tier I')).strip()
+    tier = row.get('ESCAT_Tier', 'Tier IV')
     if tier == 'Tier I': e_tier = 100.0
     elif tier == 'Tier II': e_tier = 75.0
     elif tier == 'Tier III': e_tier = 50.0
@@ -72,14 +98,14 @@ def calculate_vmtb_score(row):
 def load_real_world_data():
     """Loads the cBioPortal derived dataset directly from the data/ folder."""
     file_path = os.path.join("data", "Processed_Clinical_Dashboard_Data.xlsx")
-    fallback_path = "Processed_Clinical_Dashboard_Data.xlsx" # If placed in root
+    fallback_path = "Processed_Clinical_Dashboard_Data.xlsx"
     
     if os.path.exists(file_path):
         df = pd.read_excel(file_path)
     elif os.path.exists(fallback_path):
         df = pd.read_excel(fallback_path)
     else:
-        st.error("🚨 Critical Error: `Processed_Clinical_Dashboard_Data.xlsx` not found. Please ensure the file is placed inside a `data/` folder in your GitHub repository.")
+        st.error("🚨 Critical Error: `Processed_Clinical_Dashboard_Data.xlsx` not found. Please ensure the file is placed in the project directory.")
         st.stop()
         
     # Coerce critical analytical datatypes
@@ -93,7 +119,8 @@ def load_real_world_data():
     if 'KRAS_Mutant' not in df.columns: df['KRAS_Mutant'] = 'No'
     if 'TP53_Mutant' not in df.columns: df['TP53_Mutant'] = 'No'
     
-    # Automatically calculate the scientific VMTB score
+    # Execute the Clinical Logic Pipeline
+    df['ESCAT_Tier'] = df.apply(assign_escat_tier, axis=1)
     df['VMTB_Matching_Score'] = df.apply(calculate_vmtb_score, axis=1)
     
     return df
@@ -103,7 +130,7 @@ raw_df = load_real_world_data()
 # =========================================================
 # 4. Sidebar Dynamic Filtering
 # =========================================================
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3022/3022565.png", width=60) # Simple DNA icon
+st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3022/3022565.png", width=60)
 st.sidebar.title("TCF-001 TRACK")
 st.sidebar.success("✅ Real-World Validation Data Loaded")
 st.sidebar.markdown("---")
@@ -127,7 +154,7 @@ if total_patients == 0:
 # 5. Header & Executive Summary Metrics
 # =========================================================
 st.title("Decentralized Genomic Profiling & Clinical Analytics")
-st.caption("Precision Oncology Platform: Kaplan-Meier Survival, Cox PH Regression, ESCAT/VMTB Matching & superRCA Liquid Biopsy")
+st.caption("Precision Oncology Platform: Kaplan-Meier Survival, Cox PH Regression, ESCAT/VMTB Actionability & superRCA Liquid Biopsy")
 
 col1, col2, col3, col4 = st.columns(4)
 matched_pts = filtered_df[filtered_df['Therapy_Type'] == 'Targeted/Matched']
@@ -145,7 +172,7 @@ st.markdown("---")
 tab_surv, tab_cph, tab_vmtb, tab_mrd, tab_mut, tab_data = st.tabs([
     "📈 Survival (Kaplan-Meier)",
     "🌲 Multivariable Cox PH",
-    "🎯 VMTB Actionability",
+    "🎯 ESCAT & VMTB",
     "🔬 superRCA Liquid Biopsy",
     "🧬 Mutation Co-Occurrence",
     "📋 Data Export (Table 1)"
@@ -227,11 +254,16 @@ with tab_cph:
 # TAB 3: VMTB Actionability Analysis
 # ---------------------------------------------------------
 with tab_vmtb:
-    st.subheader("ESCAT-Derived Virtual Molecular Tumor Board (VMTB) Actionability")
+    st.subheader("ESCAT-Derived Virtual Molecular Tumor Board Actionability")
     
     col_v1, col_v2 = st.columns(2)
     with col_v1:
-        fig_match = px.histogram(filtered_df, x='VMTB_Matching_Score', color='Therapy_Type', nbins=20, barmode='overlay', color_discrete_sequence=['#1f77b4', '#d62728'], title="Distribution of VMTB Scores")
+        fig_match = px.histogram(
+            filtered_df, x='VMTB_Matching_Score', color='ESCAT_Tier', 
+            nbins=20, barmode='stack', 
+            title="Distribution of VMTB Scores by ESCAT Tier",
+            category_orders={"ESCAT_Tier": ["Tier I", "Tier II", "Tier III", "Tier IV"]}
+        )
         fig_match.add_vline(x=50, line_dash="dash", line_color="green", annotation_text="High Match Threshold (≥50)")
         st.plotly_chart(fig_match, use_container_width=True)
         
@@ -288,15 +320,17 @@ with tab_data:
     st.subheader("Cohort Dataset & Table 1 Summary")
     st.dataframe(filtered_df, use_container_width=True)
     
+    tier_counts = filtered_df['ESCAT_Tier'].value_counts()
+    
     table_1_data = {
-        "Metric": ["Total Patients", "Median PFS (Months, IQR)", "Progressive Events (%)", "Targeted Therapy (%)", "Mean VMTB Score", "Median Tumor Fraction (%)"],
+        "Metric": ["Total Patients", "Median PFS (Months, IQR)", "Progressive Events (%)", "Targeted Therapy (%)", "Mean VMTB Score", "Tier I / Tier II Actionability (%)"],
         "Value": [
             f"{total_patients}",
             f"{filtered_df['PFS_Months'].median():.1f} ({filtered_df['PFS_Months'].quantile(0.25):.1f} - {filtered_df['PFS_Months'].quantile(0.75):.1f})",
             f"{(filtered_df['Progression_Event'].sum() / total_patients)*100:.1f}%",
             f"{matched_rate}%",
             f"{filtered_df['VMTB_Matching_Score'].mean():.1f}",
-            f"{filtered_df['Tumor_Fraction'].median():.4f}%"
+            f"{((tier_counts.get('Tier I', 0) + tier_counts.get('Tier II', 0)) / total_patients * 100):.1f}%"
         ]
     }
     table_1_df = pd.DataFrame(table_1_data)
@@ -305,4 +339,4 @@ with tab_data:
     csv_buffer = io.BytesIO()
     table_1_df.to_csv(csv_buffer, index=False)
     st.download_button("📥 Download Table 1 (CSV)", data=csv_buffer.getvalue(), file_name="Table1_Baseline_Characteristics.csv", mime="text/csv")
-        
+    
