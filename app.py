@@ -220,6 +220,7 @@ with tab_surv:
     else:
         st.info("Insufficient variance to plot survival curves.")
 
+
 # --- TAB 2: Multivariable Cox Proportional Hazards ---
 with tab_cph:
     st.subheader("Multivariable Cox Proportional Hazards Regression")
@@ -237,28 +238,32 @@ with tab_cph:
     if 'KRAS_Mut' in cph_df.columns and cph_df['KRAS_Mut'].nunique() > 1: valid_cols.append('KRAS_Mut')
     if 'TP53_Mut' in cph_df.columns and cph_df['TP53_Mut'].nunique() > 1: valid_cols.append('TP53_Mut')
     
-    cph_df_clean = cph_df[valid_cols].copy()
-
-    try:
-        cph = CoxPHFitter()
-        cph.fit(cph_df_clean, duration_col='PFS_Months', event_col='Progression_Event')
-        
-        col_cph1, col_cph2 = st.columns([1.2, 1])
-        with col_cph1:
-            fig_cph, ax_cph = plt.subplots(figsize=(7, 4.5))
-            cph.plot(ax=ax_cph)
-            ax_cph.set_title("Hazard Ratios (95% CI)", fontsize=12)
-            ax_cph.grid(axis='x', linestyle='--', alpha=0.5)
-            st.pyplot(fig_cph)
-            render_download_button(fig_cph, "Cox_PH_Forest_Plot", key="cph")
-            plt.close(fig_cph)
+    # NEW FIX: The Empty Model Interceptor
+    if len(valid_cols) <= 2:
+        st.info("⚠️ Insufficient variance across all covariates to run a multivariable Cox regression. Try removing some sidebar filters.")
+    else:
+        cph_df_clean = cph_df[valid_cols].copy()
+    
+        try:
+            cph = CoxPHFitter()
+            cph.fit(cph_df_clean, duration_col='PFS_Months', event_col='Progression_Event')
             
-        with col_cph2:
-            summary_table = cph.summary[['coef', 'exp(coef)', 'se(coef)', 'p']].reset_index()
-            summary_table.columns = ['Covariate', 'Log-Hazard', 'Hazard Ratio', 'Std Error', 'p-value']
-            st.dataframe(summary_table.style.format({'Log-Hazard': '{:.3f}', 'Hazard Ratio': '{:.3f}', 'Std Error': '{:.3f}', 'p-value': '{:.4e}'}), use_container_width=True)
-    except Exception as e:
-        st.warning(f"Cox PH model requires more event diversity to converge. Ensure selected cohort has adequate variance. Error: {e}")
+            col_cph1, col_cph2 = st.columns([1.2, 1])
+            with col_cph1:
+                fig_cph, ax_cph = plt.subplots(figsize=(7, 4.5))
+                cph.plot(ax=ax_cph)
+                ax_cph.set_title("Hazard Ratios (95% CI)", fontsize=12)
+                ax_cph.grid(axis='x', linestyle='--', alpha=0.5)
+                st.pyplot(fig_cph)
+                render_download_button(fig_cph, "Cox_PH_Forest_Plot", key="cph")
+                plt.close(fig_cph)
+                
+            with col_cph2:
+                summary_table = cph.summary[['coef', 'exp(coef)', 'se(coef)', 'p']].reset_index()
+                summary_table.columns = ['Covariate', 'Log-Hazard', 'Hazard Ratio', 'Std Error', 'p-value']
+                st.dataframe(summary_table.style.format({'Log-Hazard': '{:.3f}', 'Hazard Ratio': '{:.3f}', 'Std Error': '{:.3f}', 'p-value': '{:.4e}'}), use_container_width=True)
+        except Exception as e:
+            st.warning(f"Cox PH model requires more event diversity to converge. Error: {e}")
 
 # --- TAB 3: Interactive Nomogram ---
 with tab_nomogram:
@@ -288,38 +293,43 @@ with tab_nomogram:
             if pred_df['KRAS_Mut'].nunique() > 1: valid_cols_pred.append('KRAS_Mut')
             if pred_df['TP53_Mut'].nunique() > 1: valid_cols_pred.append('TP53_Mut')
             
-            pred_df_clean = pred_df[valid_cols_pred].copy()
-            
-            cph_pred = CoxPHFitter()
-            cph_pred.fit(pred_df_clean, duration_col='PFS_Months', event_col='Progression_Event')
-            
-            # Construct patient data strictly matching the fitted columns
-            pt_dict = {}
-            if 'Is_Matched' in valid_cols_pred: pt_dict['Is_Matched'] = [1 if pt_therapy == "Targeted/Matched" else 0]
-            if 'KRAS_Mut' in valid_cols_pred: pt_dict['KRAS_Mut'] = [1 if pt_kras == "Yes" else 0]
-            if 'TP53_Mut' in valid_cols_pred: pt_dict['TP53_Mut'] = [1 if pt_tp53 == "Yes" else 0]
-            pt_data = pd.DataFrame(pt_dict)
-            
-            pt_survival = cph_pred.predict_survival_function(pt_data)
-            
-            fig_nomo, ax_nomo = plt.subplots(figsize=(7, 4))
-            ax_nomo.plot(pt_survival.index, pt_survival.iloc[:, 0], color='darkgreen', linewidth=2.5)
-            
-            # Simulate the Phi_host and Tau_tox curve shift via warning labels
-            if pt_deritis > 1.2 or pt_sii > 800 or pt_age > 65:
-                ax_nomo.text(0.5, 0.5, "⚠️ Elevated Metabolic/Toxicity Stress\nActual survival probability reduced.", 
-                             transform=ax_nomo.transAxes, color='red', alpha=0.9, ha='center', bbox=dict(facecolor='white', alpha=0.9, edgecolor='red'))
-
-            ax_nomo.set_title("Predicted Individual Survival Trajectory $S(t | Z)$", fontsize=12)
-            ax_nomo.set_xlabel("Progression-Free Interval (Months)")
-            ax_nomo.set_ylabel("Probability")
-            ax_nomo.grid(True, linestyle='--', alpha=0.5)
-            
-            st.pyplot(fig_nomo)
-            render_download_button(fig_nomo, "Patient_Survival_Nomogram", key="nomo")
-            plt.close(fig_nomo)
+            # NEW FIX: The Empty Model Interceptor
+            if len(valid_cols_pred) <= 2:
+                st.info("⚠️ Insufficient cohort variance to construct a predictive nomogram for this specific filter.")
+            else:
+                pred_df_clean = pred_df[valid_cols_pred].copy()
+                
+                cph_pred = CoxPHFitter()
+                cph_pred.fit(pred_df_clean, duration_col='PFS_Months', event_col='Progression_Event')
+                
+                # Construct patient data strictly matching the fitted columns
+                pt_dict = {}
+                if 'Is_Matched' in valid_cols_pred: pt_dict['Is_Matched'] = [1 if pt_therapy == "Targeted/Matched" else 0]
+                if 'KRAS_Mut' in valid_cols_pred: pt_dict['KRAS_Mut'] = [1 if pt_kras == "Yes" else 0]
+                if 'TP53_Mut' in valid_cols_pred: pt_dict['TP53_Mut'] = [1 if pt_tp53 == "Yes" else 0]
+                pt_data = pd.DataFrame(pt_dict)
+                
+                pt_survival = cph_pred.predict_survival_function(pt_data)
+                
+                fig_nomo, ax_nomo = plt.subplots(figsize=(7, 4))
+                ax_nomo.plot(pt_survival.index, pt_survival.iloc[:, 0], color='darkgreen', linewidth=2.5)
+                
+                # Simulate the Phi_host and Tau_tox curve shift via warning labels
+                if pt_deritis > 1.2 or pt_sii > 800 or pt_age > 65:
+                    ax_nomo.text(0.5, 0.5, "⚠️ Elevated Metabolic/Toxicity Stress\nActual survival probability reduced.", 
+                                 transform=ax_nomo.transAxes, color='red', alpha=0.9, ha='center', bbox=dict(facecolor='white', alpha=0.9, edgecolor='red'))
+    
+                ax_nomo.set_title("Predicted Individual Survival Trajectory $S(t | Z)$", fontsize=12)
+                ax_nomo.set_xlabel("Progression-Free Interval (Months)")
+                ax_nomo.set_ylabel("Probability")
+                ax_nomo.grid(True, linestyle='--', alpha=0.5)
+                
+                st.pyplot(fig_nomo)
+                render_download_button(fig_nomo, "Patient_Survival_Nomogram", key="nomo")
+                plt.close(fig_nomo)
         except Exception as e:
             st.warning(f"Insufficient cohort variance to fit the predictive nomogram. Error: {e}")
+            
 
 # --- TAB 4: ESCAT & CUI ---
 with tab_vmtb:
