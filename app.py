@@ -55,7 +55,8 @@ def process_dataframe(df):
     # BUG 4 FIX: Strictly coerce numerical columns to float, dropping strings/symbols for Log-Scale
     df['PFS_Months'] = pd.to_numeric(df.get('PFS_Months'), errors='coerce')
     df['Progression_Event'] = pd.to_numeric(df.get('Progression_Event'), errors='coerce')
-    df['Tumor_Fraction'] = pd.to_numeric(df.get('Tumor_Fraction', 0.05), errors='coerce').fillna(0.05)
+    df['Tumor_Fraction'] = pd.to_numeric(df.get('Tumor_Fraction', 0.05), errors='coerce').fillna(0.05).clip(lower=0.0001)
+    #df['Tumor_Fraction'] = pd.to_numeric(df.get('Tumor_Fraction', 0.05), errors='coerce').fillna(0.05)
     
     df = df.dropna(subset=['PFS_Months', 'Progression_Event'])
     
