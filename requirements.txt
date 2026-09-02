@@ -8,3 +8,4 @@ scipy>=1.11.0
 plotly>=5.18.0
 openpyxl>=3.1.2
 pytest>=7.4.0
+graphviz>=0.20.1
