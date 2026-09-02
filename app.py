@@ -1,3 +1,4 @@
+# app.py
 import io
 import os
 import numpy as np
@@ -27,6 +28,7 @@ plt.rcParams['axes.edgecolor'] = '#333333'
 plt.rcParams['axes.linewidth'] = 0.8
 
 def render_download_button(fig, filename_base: str, key: str):
+    """Encodes matplotlib figure directly into in-memory PDF/PNG buffers (Render-safe)."""
     buf_pdf = io.BytesIO()
     fig.savefig(buf_pdf, format="pdf", bbox_inches='tight', dpi=300)
     buf_png = io.BytesIO()
@@ -88,7 +90,7 @@ if data_mode == "📂 Upload Custom Cohort":
         cols = ["Not Available"] + list(raw_upload.columns)
         def get_idx(col_name): return cols.index(col_name) if col_name in cols else 0
         
-        # UI Mappers
+        # Standard Mappers
         map_pfs = st.sidebar.selectbox("PFS (Months)", cols, index=get_idx('PFS_Months'))
         map_evt = st.sidebar.selectbox("Progression Event", cols, index=get_idx('Progression_Event'))
         map_tx = st.sidebar.selectbox("Therapy Administered", cols, index=get_idx('Therapy_Type'))
@@ -96,6 +98,7 @@ if data_mode == "📂 Upload Custom Cohort":
         map_kras = st.sidebar.selectbox("KRAS Status", cols, index=get_idx('KRAS_Mutant'))
         map_tp53 = st.sidebar.selectbox("TP53 Status", cols, index=get_idx('TP53_Mutant'))
         
+        # Host-Tumor Modifiers Mappers
         st.sidebar.markdown("#### Host-Tumor Modifiers")
         map_ast = st.sidebar.selectbox("AST Level (MASLD Proxy)", cols, index=get_idx('AST'))
         map_age = st.sidebar.selectbox("Patient Age (Toxicity)", cols, index=get_idx('Age'))
@@ -142,12 +145,12 @@ total_patients = len(filtered_df)
 if total_patients == 0:
     st.warning("No patients match current filter parameters.")
     st.stop()
-    
+
 # =========================================================
 # 3. Header Metrics
 # =========================================================
 st.title("Decentralized Genomic Profiling & Clinical Analytics")
-st.caption("Integrative Host-Tumor Actionability Platform: ESCAT, Epistasis, and Metabolic Stress Analytics")
+st.caption("Integrative Host-Tumor Platform: ESCAT, Epistasis, Toxicity (Tau), & Clonal Kinetics")
 
 col1, col2, col3, col4 = st.columns(4)
 matched_pts = filtered_df[filtered_df['Therapy_Type'] == 'Targeted/Matched']
@@ -156,7 +159,7 @@ matched_rate = round((len(matched_pts) / total_patients) * 100, 1) if total_pati
 col1.metric("Evaluable Cohort", f"{total_patients:,} pts")
 col2.metric("Median PFS", f"{filtered_df['PFS_Months'].median():.1f} Mo")
 col3.metric("Targeted Therapy Rate", f"{matched_rate}%")
-col4.metric("Mean VMTB Score", f"{filtered_df['VMTB_Matching_Score'].mean():.1f}")
+col4.metric("Mean Clinical Utility (CUI)", f"{filtered_df['VMTB_Matching_Score'].mean():.1f}")
 st.markdown("---")
 
 # =========================================================
@@ -166,8 +169,8 @@ tab_surv, tab_cph, tab_nomogram, tab_vmtb, tab_mrd, tab_mut, tab_pathway, tab_da
     "📈 Survival & Benchmarks",
     "🌲 Multivariable Cox PH",
     "🧮 Interactive Nomogram",
-    "🎯 ESCAT & VMTB",
-    "🔬 superRCA Liquid Biopsy",
+    "🎯 ESCAT & CUI",
+    "🔬 Liquid Biopsy Kinetics",
     "🧬 Mutation Co-Occurrence",
     "🗺️ Decision Pathway",
     "📋 Data Export"
@@ -242,7 +245,7 @@ with tab_cph:
 # --- TAB 3: Interactive Nomogram ---
 with tab_nomogram:
     st.subheader("Point-of-Care Predictive Nomogram")
-    st.markdown("Translates the cohort's multivariable regression into an individualized prediction curve, adjusted for metabolic proxies.")
+    st.markdown("Translates the cohort's multivariable regression into an individualized prediction curve, adjusted for MASLD proxies and age-related toxicity.")
     
     col_n1, col_n2 = st.columns([1, 2])
     with col_n1:
@@ -250,6 +253,7 @@ with tab_nomogram:
         pt_therapy = st.radio("Therapy Administered", ["Targeted/Matched", "Standard Care"])
         pt_kras = st.selectbox("Actionable Target (KRAS)", ["Yes", "No"])
         pt_tp53 = st.selectbox("Resistance Co-Mutation (TP53)", ["No", "Yes"])
+        pt_age = st.slider("Patient Age (Toxicity Modifier)", 30, 90, 50)
         pt_sii = st.slider("Systemic Inflammation (SII)", 200, 1500, 500)
         pt_deritis = st.slider("MASLD Proxy (AST/ALT Ratio)", 0.5, 3.0, 1.0, 0.1)
         
@@ -275,9 +279,9 @@ with tab_nomogram:
             fig_nomo, ax_nomo = plt.subplots(figsize=(7, 4))
             ax_nomo.plot(pt_survival.index, pt_survival.iloc[:, 0], color='darkgreen', linewidth=2.5)
             
-            # Simulate the Phi_host curve shift via warning labels
-            if pt_deritis > 1.2 or pt_sii > 800:
-                ax_nomo.text(0.5, 0.5, "⚠️ Elevated Metabolic/Hepatic Stress\nActual survival probability reduced.", 
+            # Simulate the Phi_host and Tau_tox curve shift via warning labels
+            if pt_deritis > 1.2 or pt_sii > 800 or pt_age > 65:
+                ax_nomo.text(0.5, 0.5, "⚠️ Elevated Metabolic/Toxicity Stress\nActual survival probability reduced.", 
                              transform=ax_nomo.transAxes, color='red', alpha=0.9, ha='center', bbox=dict(facecolor='white', alpha=0.9, edgecolor='red'))
 
             ax_nomo.set_title("Predicted Individual Survival Trajectory $S(t | Z)$", fontsize=12)
@@ -291,21 +295,21 @@ with tab_nomogram:
         except Exception as e:
             st.warning("Insufficient cohort variance to fit the predictive nomogram.")
 
-# --- TAB 4: ESCAT & VMTB ---
+# --- TAB 4: ESCAT & CUI ---
 with tab_vmtb:
-    st.subheader("Integrative Actionability Distribution")
+    st.subheader("Integrative Actionability Distribution (CUI)")
     col_v1, col_v2 = st.columns(2)
     with col_v1:
         fig_match = px.histogram(
             filtered_df, x='VMTB_Matching_Score', color='ESCAT_Tier', 
-            nbins=20, barmode='stack', title="VMTB Scores by ESCAT Tier",
+            nbins=20, barmode='stack', title="Clinical Utility Index (CUI) by ESCAT Tier",
             category_orders={"ESCAT_Tier": ["Tier I", "Tier II", "Tier III", "Tier IV"]}
         )
         fig_match.add_vline(x=50, line_dash="dash", line_color="green")
         st.plotly_chart(fig_match, use_container_width=True)
     with col_v2:
-        filtered_df['Match_Tier'] = np.where(filtered_df['VMTB_Matching_Score'] >= 50, 'High Match (≥50)', 'Low Match (<50)')
-        fig_box = px.box(filtered_df, x='Match_Tier', y='PFS_Months', color='Match_Tier', color_discrete_sequence=['#2ca02c', '#7f7f7f'], title="PFS by Actionability Threshold")
+        filtered_df['Match_Tier'] = np.where(filtered_df['VMTB_Matching_Score'] >= 50, 'High Utility (≥50)', 'Low Utility (<50)')
+        fig_box = px.box(filtered_df, x='Match_Tier', y='PFS_Months', color='Match_Tier', color_discrete_sequence=['#2ca02c', '#7f7f7f'], title="PFS by Utility Threshold")
         st.plotly_chart(fig_box, use_container_width=True)
 
 # --- TAB 5: Liquid Biopsy ---
@@ -314,7 +318,7 @@ with tab_mrd:
     fig_mrd = go.Figure()
     fig_mrd.add_trace(go.Scatter(
         x=filtered_df['PFS_Months'], y=filtered_df['Tumor_Fraction'], mode='markers',
-        marker=dict(size=8, color=filtered_df['VMTB_Matching_Score'], colorscale='Viridis', showscale=True, colorbar=dict(title="VMTB Score")),
+        marker=dict(size=8, color=filtered_df['VMTB_Matching_Score'], colorscale='Viridis', showscale=True, colorbar=dict(title="CUI Score")),
         text=filtered_df.get('Patient_ID', 'ID'), hovertemplate="<b>Patient:</b> %{text}<br><b>PFS:</b> %{x:.1f} Mo<br><b>Tumor Fraction:</b> %{y:.4f}%<extra></extra>"
     ))
     fig_mrd.update_layout(xaxis_title='Progression-Free Survival (Months)', yaxis_title='Tumor Fraction % (Log Scale)', yaxis_type="log")
@@ -347,7 +351,7 @@ with tab_mut:
 # --- TAB 7: Decision Pathway (Graphviz) ---
 with tab_pathway:
     st.subheader("Dynamic Clinical Decision & Actionability Pathway")
-    st.markdown("Automated algorithmic flowchart mapping genomic tiering through host-tumor metabolic modulation.")
+    st.markdown("Automated algorithmic flowchart mapping genomic tiering through host-tumor metabolic modulation, toxicity, and clonal kinetics.")
     
     tier_counts = filtered_df['ESCAT_Tier'].value_counts()
     t12_count = tier_counts.get('Tier I', 0) + tier_counts.get('Tier II', 0)
@@ -370,9 +374,10 @@ with tab_pathway:
         C2 [label="Tier III / IV\\nVUS / Investigational", fillcolor="#f8d7da", color="#dc3545"];
         
         D [label="Epistatic Pathway Resistance\\nTP53 Co-mutation Detected\\n({epistasis_pct}%)", fillcolor="#fff3cd"];
-        E [label="Host-Tumor Metabolic Modulation\\n(De Ritis MASLD Proxy & SII Inflammation)", fillcolor="#e0c3fc"];
+        E [label="Host-Tumor Metabolic & Toxicity Modifiers\\n(De Ritis Proxy, SII, & Age-related Tau)", fillcolor="#e0c3fc"];
         
-        F [label="Final Deterministic S_VMTB Score\\n(Actionability Index)", fillcolor="#d1e7dd"];
+        K [label="Longitudinal Clonal Kinetics\\n(ctDNA Clearance Velocity)", fillcolor="#ffe8a1"];
+        F [label="Final Clinical Utility Index (CUI)\\n(Actionability Score)", fillcolor="#d1e7dd"];
         
         A -> B;
         B -> C1 [label="{t12_pct}%"];
@@ -382,7 +387,8 @@ with tab_pathway:
         C2 -> D;
         
         D -> E [label="Penalty (Ω) applied\\nif epistatic resistance"];
-        E -> F [label="Host resilience (Φ)\\nmodulates efficacy"];
+        E -> K [label="Host resilience (Φ) &\\nToxicity (τ) modulates efficacy"];
+        K -> F [label="Kinetics (K) adjusts\\nfor active evasion"];
     }}
     """
     col_g1, col_g2 = st.columns([2, 1])
@@ -399,7 +405,7 @@ with tab_data:
     tier_counts = filtered_df['ESCAT_Tier'].value_counts()
     
     table_1_data = {
-        "Metric": ["Total Patients", "Median PFS (Months, IQR)", "Progressive Events (%)", "Targeted Therapy (%)", "Mean VMTB Score", "Tier I / Tier II Actionability (%)"],
+        "Metric": ["Total Patients", "Median PFS (Months, IQR)", "Progressive Events (%)", "Targeted Therapy (%)", "Mean CUI Score", "Tier I / Tier II Actionability (%)"],
         "Value": [
             f"{total_patients}",
             f"{filtered_df['PFS_Months'].median():.1f} ({filtered_df['PFS_Months'].quantile(0.25):.1f} - {filtered_df['PFS_Months'].quantile(0.75):.1f})",
@@ -411,6 +417,7 @@ with tab_data:
     }
     table_1_df = pd.DataFrame(table_1_data)
     st.table(table_1_df)
+    
     csv_buffer = io.BytesIO()
     table_1_df.to_csv(csv_buffer, index=False)
     st.download_button("📥 Download Table 1 (CSV)", data=csv_buffer.getvalue(), file_name="Table1_Baseline_Characteristics.csv", mime="text/csv")
