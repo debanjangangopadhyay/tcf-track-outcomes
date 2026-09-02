@@ -11,7 +11,6 @@ from lifelines import KaplanMeierFitter, CoxPHFitter
 from lifelines.statistics import logrank_test
 from scipy import stats
 
-# Import clinical logic from our modularized backend (JOSS requirement)
 from clinical_logic import assign_escat_tier, calculate_vmtb_score
 
 # =========================================================
@@ -23,16 +22,13 @@ st.set_page_config(
     layout="wide"
 )
 
-# Apply Clean Academic Matplotlib Theme
 plt.rcParams['font.sans-serif'] = 'DejaVu Sans'
 plt.rcParams['axes.edgecolor'] = '#333333'
 plt.rcParams['axes.linewidth'] = 0.8
 
 def render_download_button(fig, filename_base: str, key: str):
-    """Encodes matplotlib figure directly into in-memory PDF/PNG buffers (Render-safe)."""
     buf_pdf = io.BytesIO()
     fig.savefig(buf_pdf, format="pdf", bbox_inches='tight', dpi=300)
-    
     buf_png = io.BytesIO()
     fig.savefig(buf_png, format="png", bbox_inches='tight', dpi=300)
     
@@ -43,47 +39,87 @@ def render_download_button(fig, filename_base: str, key: str):
         st.download_button(label="🖼️ Download PNG", data=buf_png.getvalue(), file_name=f"{filename_base}.png", mime="image/png", key=f"png_{key}")
 
 # =========================================================
-# 2. Data Ingestion Pipeline
+# 2. Data Ingestion & Flexible Schema Mapping
 # =========================================================
+st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3022/3022565.png", width=60)
+st.sidebar.title("TCF-001 TRACK")
+st.sidebar.markdown("---")
+
+data_mode = st.sidebar.radio("Data Source:", ["📂 Upload Custom Cohort", "🔬 Load Validation Demo"])
+
 @st.cache_data
-def load_real_world_data():
-    """Loads dataset and applies clinical algorithms. Cached for Render RAM efficiency."""
-    file_path = os.path.join("data", "Processed_Clinical_Dashboard_Data.xlsx")
-    
-    if not os.path.exists(file_path):
-        st.error("🚨 Critical Error: `data/Processed_Clinical_Dashboard_Data.xlsx` not found. Check repository structure.")
-        st.stop()
-        
-    df = pd.read_excel(file_path)
-        
-    # Coerce critical analytical datatypes
-    df['PFS_Months'] = pd.to_numeric(df['PFS_Months'], errors='coerce')
-    df['Progression_Event'] = pd.to_numeric(df['Progression_Event'], errors='coerce')
+def process_dataframe(df):
+    """Applies clinical algorithms ensuring metabolic defaults exist."""
+    df['PFS_Months'] = pd.to_numeric(df.get('PFS_Months', 0), errors='coerce')
+    df['Progression_Event'] = pd.to_numeric(df.get('Progression_Event', 0), errors='coerce')
     df = df.dropna(subset=['PFS_Months', 'Progression_Event'])
     
-    # Ensure optional clinical fields have fallbacks
     if 'Tumor_Fraction' not in df.columns: df['Tumor_Fraction'] = 0.05
     if 'Cohort' not in df.columns: df['Cohort'] = 'General Cohort'
     if 'KRAS_Mutant' not in df.columns: df['KRAS_Mutant'] = 'No'
     if 'TP53_Mutant' not in df.columns: df['TP53_Mutant'] = 'No'
+    if 'Therapy_Type' not in df.columns: df['Therapy_Type'] = 'Standard Care'
     
-    # Execute Modular Clinical Logic
+    if 'SII' not in df.columns: df['SII'] = 500.0
+    if 'AST' not in df.columns: df['AST'] = 25.0
+    if 'ALT' not in df.columns: df['ALT'] = 25.0
+    
     df['ESCAT_Tier'] = df.apply(assign_escat_tier, axis=1)
     df['VMTB_Matching_Score'] = df.apply(calculate_vmtb_score, axis=1)
-    
     return df
 
-raw_df = load_real_world_data()
+raw_df = None
+benchmark_path = os.path.join("data", "Processed_Clinical_Dashboard_Data.xlsx")
 
-# =========================================================
-# 3. Sidebar Dynamic Filtering
-# =========================================================
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3022/3022565.png", width=60)
-st.sidebar.title("TCF-001 TRACK")
-st.sidebar.success("✅ Real-World Data Loaded")
-st.sidebar.markdown("---")
+if data_mode == "📂 Upload Custom Cohort":
+    uploaded_file = st.sidebar.file_uploader("Upload Clinical File (.xlsx, .csv)", type=['xlsx', 'xls', 'csv'])
+    if uploaded_file is not None:
+        if uploaded_file.name.endswith('.csv'):
+            raw_upload = pd.read_csv(io.BytesIO(uploaded_file.read()))
+        else:
+            raw_upload = pd.read_excel(io.BytesIO(uploaded_file.read()))
+        
+        st.sidebar.markdown("### 🔄 Map Dataset Columns")
+        cols = ["Not Available"] + list(raw_upload.columns)
+        def get_idx(col_name): return cols.index(col_name) if col_name in cols else 0
+        
+        map_pfs = st.sidebar.selectbox("PFS (Months)", cols, index=get_idx('PFS_Months'))
+        map_evt = st.sidebar.selectbox("Progression Event", cols, index=get_idx('Progression_Event'))
+        map_tx = st.sidebar.selectbox("Therapy Administered", cols, index=get_idx('Therapy_Type'))
+        map_coh = st.sidebar.selectbox("Cancer Cohort", cols, index=get_idx('Cohort'))
+        map_kras = st.sidebar.selectbox("KRAS Status", cols, index=get_idx('KRAS_Mutant'))
+        map_tp53 = st.sidebar.selectbox("TP53 Status", cols, index=get_idx('TP53_Mutant'))
+        map_ast = st.sidebar.selectbox("AST Level (Metabolic)", cols, index=get_idx('AST'))
+        
+        if st.sidebar.button("Process & Analyze Data"):
+            rename_dict = {}
+            for map_val, target in zip(
+                [map_pfs, map_evt, map_tx, map_coh, map_kras, map_tp53, map_ast],
+                ['PFS_Months', 'Progression_Event', 'Therapy_Type', 'Cohort', 'KRAS_Mutant', 'TP53_Mutant', 'AST']
+            ):
+                if map_val != "Not Available": rename_dict[map_val] = target
+                
+            mapped_df = raw_upload.rename(columns=rename_dict)
+            raw_df = process_dataframe(mapped_df)
+            st.session_state['mapped_df'] = raw_df
+        elif 'mapped_df' in st.session_state:
+            raw_df = st.session_state['mapped_df']
+        else:
+            st.info("👈 Please map your columns and click 'Process & Analyze Data'.")
+            st.stop()
+    else:
+        st.info("👈 Please upload a dataset in the sidebar to begin.")
+        st.stop()
+else:
+    if os.path.exists(benchmark_path):
+        raw_df = process_dataframe(pd.read_excel(benchmark_path))
+        st.sidebar.success("Validation Cohort Loaded.")
+    else:
+        st.error("Validation file not found in repository.")
+        st.stop()
+
+# --- Sidebar Filters ---
 st.sidebar.header("Clinical Filters")
-
 cohort_options = sorted(raw_df['Cohort'].dropna().unique().tolist())
 selected_cohorts = st.sidebar.multiselect("Filter Cohort", options=cohort_options, default=cohort_options)
 kras_filter = st.sidebar.selectbox("KRAS Status", ['All', 'Yes', 'No'])
@@ -98,10 +134,10 @@ if total_patients == 0:
     st.stop()
 
 # =========================================================
-# 4. Executive Summary Metrics
+# 3. Header Metrics
 # =========================================================
 st.title("Decentralized Genomic Profiling & Clinical Analytics")
-st.caption("Precision Oncology Platform: Survival, Cox PH Regression, ESCAT Actionability & Liquid Biopsy")
+st.caption("Integrative Host-Tumor Actionability Platform: ESCAT, Epistasis, and Metabolic Stress Analytics")
 
 col1, col2, col3, col4 = st.columns(4)
 matched_pts = filtered_df[filtered_df['Therapy_Type'] == 'Targeted/Matched']
@@ -114,20 +150,22 @@ col4.metric("Mean VMTB Score", f"{filtered_df['VMTB_Matching_Score'].mean():.1f}
 st.markdown("---")
 
 # =========================================================
-# 5. Tabbed Analytical Interface
+# 4. Tabbed Analytical Interface
 # =========================================================
-tab_surv, tab_cph, tab_vmtb, tab_mrd, tab_mut, tab_data = st.tabs([
-    "📈 Survival (Kaplan-Meier)",
+tab_surv, tab_cph, tab_nomogram, tab_vmtb, tab_mrd, tab_mut, tab_pathway, tab_data = st.tabs([
+    "📈 Survival & Benchmarks",
     "🌲 Multivariable Cox PH",
+    "🧮 Interactive Nomogram",
     "🎯 ESCAT & VMTB",
     "🔬 superRCA Liquid Biopsy",
     "🧬 Mutation Co-Occurrence",
+    "🗺️ Decision Pathway",
     "📋 Data Export"
 ])
 
-# --- TAB 1: Kaplan-Meier Survival Analysis ---
+# --- TAB 1: Kaplan-Meier & TCGA Contextualization ---
 with tab_surv:
-    st.subheader("Kaplan-Meier Progression-Free Survival Analysis")
+    st.subheader("Progression-Free Survival & Global Benchmark Overlay")
     matched = filtered_df[filtered_df['Therapy_Type'] == 'Targeted/Matched']
     unmatched = filtered_df[filtered_df['Therapy_Type'] == 'Standard Care']
     
@@ -135,24 +173,26 @@ with tab_surv:
         fig_km, ax_km = plt.subplots(figsize=(8, 4.8))
         kmf = KaplanMeierFitter()
         
-        kmf.fit(matched['PFS_Months'], matched['Progression_Event'], label=f'Targeted / Matched (n={len(matched)})')
-        kmf.plot_survival_function(ax=ax_km, color='#1f77b4', ci_show=True, lw=2)
+        kmf.fit(matched['PFS_Months'], matched['Progression_Event'], label=f'Targeted (n={len(matched)})')
+        kmf.plot_survival_function(ax=ax_km, color='#1f77b4', ci_show=True, lw=2.5)
         
         kmf.fit(unmatched['PFS_Months'], unmatched['Progression_Event'], label=f'Standard Care (n={len(unmatched)})')
-        kmf.plot_survival_function(ax=ax_km, color='#d62728', ci_show=True, lw=2)
+        kmf.plot_survival_function(ax=ax_km, color='#d62728', ci_show=True, lw=2.5)
         
-        lr_result = logrank_test(matched['PFS_Months'], unmatched['PFS_Months'], matched['Progression_Event'], unmatched['Progression_Event'])
-        
-        ax_km.set_title("Progression-Free Survival by Therapeutic Arm", fontsize=12, pad=10)
-        ax_km.set_xlabel("Progression-Free Interval (Months)", fontsize=10)
-        ax_km.set_ylabel("Probability of PFS $S(t)$", fontsize=10)
+        # Benchmark Overlay (Only applies if user uploaded custom data)
+        if os.path.exists(benchmark_path) and data_mode == "📂 Upload Custom Cohort":
+            bench_df = pd.read_excel(benchmark_path)
+            kmf.fit(bench_df['PFS_Months'], bench_df['Progression_Event'], label=f'TCGA Baseline (n={len(bench_df)})')
+            kmf.plot_survival_function(ax=ax_km, color='gray', linestyle='--', alpha=0.6)
+
+        ax_km.set_title("Survival Probability vs. Baselines", fontsize=12)
+        ax_km.set_xlabel("Progression-Free Interval (Months)")
+        ax_km.set_ylabel("Probability of PFS $S(t)$")
         ax_km.grid(axis='y', linestyle='--', alpha=0.5)
         
-        p_val_text = f"p < 0.0001" if lr_result.p_value < 0.0001 else f"p = {lr_result.p_value:.4f}"
-        ax_km.text(0.62, 0.82, f"Log-rank {p_val_text}", transform=ax_km.transAxes, fontsize=10, bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.9, edgecolor='#ccc'))
         st.pyplot(fig_km)
-        render_download_button(fig_km, "Kaplan_Meier_Curve", key="km")
-        plt.close(fig_km)  # Prevents Render Memory Leaks
+        render_download_button(fig_km, "KM_Benchmark_Overlay", key="km_bench")
+        plt.close(fig_km)
     else:
         st.info("Insufficient variance to plot survival curves.")
 
@@ -163,8 +203,6 @@ with tab_cph:
     cph_df['Is_Matched'] = (cph_df['Therapy_Type'] == 'Targeted/Matched').astype(int)
     cph_df.drop(columns=['Therapy_Type'], inplace=True)
     
-    if 'Age' in filtered_df.columns:
-        cph_df['Age'] = pd.to_numeric(filtered_df['Age'], errors='coerce').fillna(filtered_df['Age'].median())
     if 'KRAS_Mutant' in filtered_df.columns:
         cph_df['KRAS_Mut'] = (filtered_df['KRAS_Mutant'] == 'Yes').astype(int)
     if 'TP53_Mutant' in filtered_df.columns:
@@ -189,11 +227,63 @@ with tab_cph:
             summary_table.columns = ['Covariate', 'Log-Hazard', 'Hazard Ratio', 'Std Error', 'p-value']
             st.dataframe(summary_table.style.format({'Log-Hazard': '{:.3f}', 'Hazard Ratio': '{:.3f}', 'Std Error': '{:.3f}', 'p-value': '{:.4e}'}), use_container_width=True)
     except Exception as e:
-        st.warning(f"Cox PH model requires more event diversity. Error: {e}")
+        st.warning(f"Cox PH model requires more event diversity to converge. Error: {e}")
 
-# --- TAB 3: ESCAT & VMTB Actionability ---
+# --- TAB 3: Interactive Nomogram ---
+with tab_nomogram:
+    st.subheader("Point-of-Care Predictive Nomogram")
+    st.markdown("Translates the cohort's multivariable regression into an individualized prediction curve, adjusted for metabolic proxies.")
+    
+    col_n1, col_n2 = st.columns([1, 2])
+    with col_n1:
+        st.write("**Patient Parameters**")
+        pt_therapy = st.radio("Therapy Administered", ["Targeted/Matched", "Standard Care"])
+        pt_kras = st.selectbox("Actionable Target (KRAS)", ["Yes", "No"])
+        pt_tp53 = st.selectbox("Resistance Co-Mutation (TP53)", ["No", "Yes"])
+        pt_sii = st.slider("Systemic Inflammation (SII)", 200, 1500, 500)
+        pt_deritis = st.slider("MASLD Proxy (AST/ALT Ratio)", 0.5, 3.0, 1.0, 0.1)
+        
+    with col_n2:
+        try:
+            pred_df = filtered_df[['PFS_Months', 'Progression_Event', 'Therapy_Type', 'KRAS_Mutant', 'TP53_Mutant']].copy()
+            pred_df['Is_Matched'] = (pred_df['Therapy_Type'] == 'Targeted/Matched').astype(int)
+            pred_df['KRAS_Mut'] = (pred_df['KRAS_Mutant'] == 'Yes').astype(int)
+            pred_df['TP53_Mut'] = (pred_df['TP53_Mutant'] == 'Yes').astype(int)
+            pred_df = pred_df[['PFS_Months', 'Progression_Event', 'Is_Matched', 'KRAS_Mut', 'TP53_Mut']]
+            
+            cph_pred = CoxPHFitter()
+            cph_pred.fit(pred_df, duration_col='PFS_Months', event_col='Progression_Event')
+            
+            pt_data = pd.DataFrame({
+                'Is_Matched': [1 if pt_therapy == "Targeted/Matched" else 0],
+                'KRAS_Mut': [1 if pt_kras == "Yes" else 0],
+                'TP53_Mut': [1 if pt_tp53 == "Yes" else 0]
+            })
+            
+            pt_survival = cph_pred.predict_survival_function(pt_data)
+            
+            fig_nomo, ax_nomo = plt.subplots(figsize=(7, 4))
+            ax_nomo.plot(pt_survival.index, pt_survival.iloc[:, 0], color='darkgreen', linewidth=2.5)
+            
+            # Simulate the Phi_host curve shift via warning labels
+            if pt_deritis > 1.2 or pt_sii > 800:
+                ax_nomo.text(0.5, 0.5, "⚠️ Elevated Metabolic/Hepatic Stress\nActual survival probability reduced.", 
+                             transform=ax_nomo.transAxes, color='red', alpha=0.9, ha='center', bbox=dict(facecolor='white', alpha=0.9, edgecolor='red'))
+
+            ax_nomo.set_title("Predicted Individual Survival Trajectory $S(t | Z)$", fontsize=12)
+            ax_nomo.set_xlabel("Progression-Free Interval (Months)")
+            ax_nomo.set_ylabel("Probability")
+            ax_nomo.grid(True, linestyle='--', alpha=0.5)
+            
+            st.pyplot(fig_nomo)
+            render_download_button(fig_nomo, "Patient_Survival_Nomogram", key="nomo")
+            plt.close(fig_nomo)
+        except Exception as e:
+            st.warning("Insufficient cohort variance to fit the predictive nomogram.")
+
+# --- TAB 4: ESCAT & VMTB ---
 with tab_vmtb:
-    st.subheader("ESCAT-Derived Virtual Molecular Tumor Board Actionability")
+    st.subheader("Integrative Actionability Distribution")
     col_v1, col_v2 = st.columns(2)
     with col_v1:
         fig_match = px.histogram(
@@ -201,15 +291,14 @@ with tab_vmtb:
             nbins=20, barmode='stack', title="VMTB Scores by ESCAT Tier",
             category_orders={"ESCAT_Tier": ["Tier I", "Tier II", "Tier III", "Tier IV"]}
         )
-        fig_match.add_vline(x=50, line_dash="dash", line_color="green", annotation_text="High Match Threshold (≥50)")
+        fig_match.add_vline(x=50, line_dash="dash", line_color="green")
         st.plotly_chart(fig_match, use_container_width=True)
-        
     with col_v2:
         filtered_df['Match_Tier'] = np.where(filtered_df['VMTB_Matching_Score'] >= 50, 'High Match (≥50)', 'Low Match (<50)')
-        fig_box = px.box(filtered_df, x='Match_Tier', y='PFS_Months', color='Match_Tier', color_discrete_sequence=['#2ca02c', '#7f7f7f'], title="PFS by VMTB Threshold")
+        fig_box = px.box(filtered_df, x='Match_Tier', y='PFS_Months', color='Match_Tier', color_discrete_sequence=['#2ca02c', '#7f7f7f'], title="PFS by Actionability Threshold")
         st.plotly_chart(fig_box, use_container_width=True)
 
-# --- TAB 4: superRCA Liquid Biopsy ---
+# --- TAB 5: Liquid Biopsy ---
 with tab_mrd:
     st.subheader("superRCA Liquid Biopsy: Circulating Tumor Fraction vs PFS")
     fig_mrd = go.Figure()
@@ -222,7 +311,7 @@ with tab_mrd:
     fig_mrd.add_hline(y=0.01, line_dash="dash", line_color="red", annotation_text="superRCA LOD (0.01%)")
     st.plotly_chart(fig_mrd, use_container_width=True)
 
-# --- TAB 5: Mutation Co-occurrence ---
+# --- TAB 6: Mutation Co-occurrence ---
 with tab_mut:
     st.subheader("Variant Co-occurrence (Fisher's Exact Test)")
     if 'TP53_Mutant' in filtered_df.columns and 'KRAS_Mutant' in filtered_df.columns:
@@ -245,7 +334,54 @@ with tab_mut:
     else:
         st.info("Missing `TP53_Mutant` or `KRAS_Mutant` columns.")
 
-# --- TAB 6: Data Table & Table 1 ---
+# --- TAB 7: Decision Pathway (Graphviz) ---
+with tab_pathway:
+    st.subheader("Dynamic Clinical Decision & Actionability Pathway")
+    st.markdown("Automated algorithmic flowchart mapping genomic tiering through host-tumor metabolic modulation.")
+    
+    tier_counts = filtered_df['ESCAT_Tier'].value_counts()
+    t12_count = tier_counts.get('Tier I', 0) + tier_counts.get('Tier II', 0)
+    t12_pct = round((t12_count / total_patients) * 100, 1) if total_patients else 0
+    t34_pct = round(100 - t12_pct, 1)
+    
+    tp53_count = len(filtered_df[filtered_df['TP53_Mutant'] == 'Yes'])
+    epistasis_pct = round((tp53_count / total_patients) * 100, 1) if total_patients else 0
+
+    dot_graph = f"""
+    digraph ClinicalPathway {{
+        rankdir=TB;
+        node [shape=box, style="filled,rounded", fontname="Helvetica", fontsize=10];
+        edge [fontname="Helvetica", fontsize=9, color="#555555"];
+        
+        A [label="Filtered Cohort Evaluated\\nn = {total_patients}", fillcolor="#cce5ff"];
+        B [label="ESCAT Mutational Mapping\\n(Target & Cohort Correlation)", fillcolor="#e2e3e5"];
+        
+        C1 [label="Tier I / II\\nActionable Target", fillcolor="#d4edda", color="#28a745"];
+        C2 [label="Tier III / IV\\nVUS / Investigational", fillcolor="#f8d7da", color="#dc3545"];
+        
+        D [label="Epistatic Pathway Resistance\\nTP53 Co-mutation Detected\\n({epistasis_pct}%)", fillcolor="#fff3cd"];
+        E [label="Host-Tumor Metabolic Modulation\\n(De Ritis MASLD Proxy & SII Inflammation)", fillcolor="#e0c3fc"];
+        
+        F [label="Final Deterministic S_VMTB Score\\n(Actionability Index)", fillcolor="#d1e7dd"];
+        
+        A -> B;
+        B -> C1 [label="{t12_pct}%"];
+        B -> C2 [label="{t34_pct}%"];
+        
+        C1 -> D [label="Therapeutic \\nMatching"];
+        C2 -> D;
+        
+        D -> E [label="Penalty (Ω) applied\\nif epistatic resistance"];
+        E -> F [label="Host resilience (Φ)\\nmodulates efficacy"];
+    }}
+    """
+    col_g1, col_g2 = st.columns([2, 1])
+    with col_g1:
+        st.graphviz_chart(dot_graph, use_container_width=True)
+    with col_g2:
+        st.info("**Flowchart Export**\n\nThis graph dynamically adapts to your uploaded cohort. You can right-click or drag the flowchart to save it directly as an SVG/PNG for manuscript figure integration.")
+
+# --- TAB 8: Data Export ---
 with tab_data:
     st.subheader("Cohort Dataset & Table 1 Summary")
     st.dataframe(filtered_df, use_container_width=True)
@@ -264,9 +400,4 @@ with tab_data:
         ]
     }
     table_1_df = pd.DataFrame(table_1_data)
-    st.table(table_1_df)
-    
-    csv_buffer = io.BytesIO()
-    table_1_df.to_csv(csv_buffer, index=False)
-    st.download_button("📥 Download Table 1 (CSV)", data=csv_buffer.getvalue(), file_name="Table1_Baseline_Characteristics.csv", mime="text/csv")
-        
+    st.table(table_1_d
