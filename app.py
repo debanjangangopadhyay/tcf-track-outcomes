@@ -143,15 +143,23 @@ def build_cox_features(source_df: pd.DataFrame, include_kinetics: bool = False) 
     d = source_df.copy()
     design = pd.DataFrame(index=d.index)
 
+    def safe_get_series(df_obj, col_name):
+        val = df_obj.get(col_name)
+        if val is None:
+            return pd.Series(np.nan, index=df_obj.index)
+        if isinstance(val, pd.DataFrame):
+            val = val.iloc[:, 0]
+        return pd.to_numeric(val, errors="coerce")
+
     for col in [
         "Evidence_Strength", "Evidence_Confidence", "Therapy_Compatibility",
         "KRAS_State", "TP53_State", "Tensor_Pairwise_Order",
         "Tensor_Third_Order", "Host_State_Field", "Measurement_Quality"
     ]:
-        design[col] = pd.to_numeric(d.get(col, pd.Series(np.nan, index=d.index)), errors="coerce")
+        design[col] = safe_get_series(d, col)
 
     def z(col):
-        x = pd.to_numeric(d.get(col, pd.Series(np.nan, index=d.index)), errors="coerce")
+        x = safe_get_series(d, col)
         sd = x.std(ddof=0)
         return (x - x.mean()) / (sd if np.isfinite(sd) and sd > 0 else 1.0)
 
@@ -161,10 +169,10 @@ def build_cox_features(source_df: pd.DataFrame, include_kinetics: bool = False) 
 
     if include_kinetics:
         for col in ["ctDNA_Log_Ratio", "Effective_Kinetic_State", "Kinetic_Observed"]:
-            design[col] = pd.to_numeric(d.get(col, pd.Series(np.nan, index=d.index)), errors="coerce")
+            design[col] = safe_get_series(d, col)
 
     return design.replace([np.inf, -np.inf], np.nan)
-
+    
 
 def fit_cox_design(source_df: pd.DataFrame, include_kinetics: bool = False):
     """Fit a stabilized research Cox model while dropping zero-variance predictors."""
