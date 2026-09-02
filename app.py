@@ -23,12 +23,18 @@ from lifelines.statistics import logrank_test
 from scipy import stats
 
 from clinical_logic import (
-    assign_escat_tier,
-    calculate_vmtb_score,
     derive_feature_frame,
-    build_cox_features,
-    compute_empirical_cui,
-    score_explanation,
+    compute_longitudinal_patient_state,
+    model_metadata,
+    parameter_specification,
+    split_temporal_roles,
+    run_self_checks,
+    DEFAULT_PARAMETERS,
+    MODEL_ID,
+    ENGINE_ID,
+    ARCHITECTURE_VERSION,
+    MODEL_STATUS,
+    OUTPUT_SEMANTICS,
 )
 
 # =========================================================
@@ -77,68 +83,169 @@ def safe_numeric_column(df: pd.DataFrame, col: str, default: float) -> pd.Series
     return pd.to_numeric(df[col], errors="coerce").fillna(default)
 
 
+def _normalise_yes_no(value):
+    return "Yes" if str(value).strip().casefold() in {"yes", "y", "true", "1", "mutant"} else "No"
+
+
+def _evidence_tier_from_existing(row):
+    """Use only an explicitly supplied evidence tier; never infer ESCAT from KRAS alone."""
+    for key in ("Evidence_Tier", "ESCAT_Tier"):
+        value = row.get(key, np.nan)
+        if pd.notna(value) and str(value).strip().casefold() not in {"", "nan", "none"}:
+            return str(value).strip()
+    return "Unknown"
+
+
+def _prepare_research_schema(df: pd.DataFrame) -> pd.DataFrame:
+    """Add TC-KUO v3 fields while retaining legacy application columns."""
+    out = df.copy()
+
+    if "Evidence_Tier" not in out.columns:
+        out["Evidence_Tier"] = out.apply(_evidence_tier_from_existing, axis=1)
+    else:
+        out["Evidence_Tier"] = out["Evidence_Tier"].fillna("Unknown").astype(str).str.strip()
+
+    if "ESCAT_Tier" not in out.columns:
+        out["ESCAT_Tier"] = out["Evidence_Tier"]
+    else:
+        out["ESCAT_Tier"] = out["ESCAT_Tier"].fillna(out["Evidence_Tier"]).astype(str).str.strip()
+
+    defaults = {
+        "Evidence_Confidence": np.nan,
+        "Therapy_Match_Strength": np.nan,
+        "Assay_Quality": np.nan,
+        "LOD_Margin": np.nan,
+        "Replicate_Confidence": np.nan,
+        "Treatment_Start_Day": 0.0,
+        "Followup_Measurement_Day": np.nan,
+        "Followup_Days": np.nan,
+    }
+    for col, default in defaults.items():
+        if col not in out.columns:
+            out[col] = default
+
+    for col in defaults:
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    if "KRAS_Mutant" not in out.columns:
+        out["KRAS_Mutant"] = "No"
+    if "TP53_Mutant" not in out.columns:
+        out["TP53_Mutant"] = "No"
+
+    out["KRAS_Mutant"] = out["KRAS_Mutant"].map(_normalise_yes_no)
+    out["TP53_Mutant"] = out["TP53_Mutant"].map(_normalise_yes_no)
+
+    return out
+
+
+def build_cox_features(source_df: pd.DataFrame, include_kinetics: bool = False) -> pd.DataFrame:
+    """Cox design derived from the same TC-KUO v3 state variables displayed by the app."""
+    d = source_df.copy()
+    design = pd.DataFrame(index=d.index)
+
+    for col in [
+        "Evidence_Strength", "Evidence_Confidence", "Therapy_Compatibility",
+        "KRAS_State", "TP53_State", "Tensor_Pairwise_Order",
+        "Tensor_Third_Order", "Host_State_Field", "Measurement_Quality"
+    ]:
+        design[col] = pd.to_numeric(d.get(col, pd.Series(np.nan, index=d.index)), errors="coerce")
+
+    def z(col):
+        x = pd.to_numeric(d.get(col, pd.Series(np.nan, index=d.index)), errors="coerce")
+        sd = x.std(ddof=0)
+        return (x - x.mean()) / (sd if np.isfinite(sd) and sd > 0 else 1.0)
+
+    design["SII_z"] = z("SII")
+    design["DeRitis_z"] = z("DeRitis_Ratio")
+    design["Age_z"] = z("Age")
+
+    if include_kinetics:
+        for col in ["ctDNA_Log_Ratio", "Effective_Kinetic_State", "Kinetic_Observed"]:
+            design[col] = pd.to_numeric(d.get(col, pd.Series(np.nan, index=d.index)), errors="coerce")
+
+    return design.replace([np.inf, -np.inf], np.nan)
+
+
 def fit_cox_design(source_df: pd.DataFrame, include_kinetics: bool = False):
-    """Fit a stabilized Cox model while dropping zero-variance predictors."""
+    """Fit a stabilized research Cox model while dropping zero-variance predictors."""
     design = build_cox_features(source_df, include_kinetics=include_kinetics)
     outcome = pd.DataFrame({
-        'PFS_Months': pd.to_numeric(source_df['PFS_Months'], errors='coerce'),
-        'Progression_Event': pd.to_numeric(source_df['Progression_Event'], errors='coerce'),
+        "PFS_Months": pd.to_numeric(source_df["PFS_Months"], errors="coerce"),
+        "Progression_Event": pd.to_numeric(source_df["Progression_Event"], errors="coerce"),
     })
     model_df = pd.concat([outcome, design], axis=1).replace([np.inf, -np.inf], np.nan).dropna()
 
-    feature_cols = []
-    for col in design.columns:
-        if col in model_df.columns and model_df[col].nunique(dropna=True) > 1:
-            feature_cols.append(col)
-
-    if not feature_cols:
+    feature_cols = [
+        c for c in design.columns
+        if c in model_df.columns and model_df[c].nunique(dropna=True) > 1
+    ]
+    if not feature_cols or model_df["Progression_Event"].sum() < 2:
         return None, model_df, feature_cols
 
-    model_df = model_df[['PFS_Months', 'Progression_Event'] + feature_cols].copy()
-    if model_df['Progression_Event'].sum() < 2:
-        return None, model_df, feature_cols
+    model_df = model_df[["PFS_Months", "Progression_Event"] + feature_cols].copy()
 
     try:
-        # Modest ridge penalty improves stability without changing the runtime environment.
         cph = CoxPHFitter(penalizer=0.08, l1_ratio=0.0)
-        cph.fit(model_df, duration_col='PFS_Months', event_col='Progression_Event')
+        cph.fit(model_df, duration_col="PFS_Months", event_col="Progression_Event")
         return cph, model_df, feature_cols
     except Exception:
-        # Secondary fit mirrors the original behavior if a penalized fit is incompatible.
         try:
             cph = CoxPHFitter()
-            cph.fit(model_df, duration_col='PFS_Months', event_col='Progression_Event')
+            cph.fit(model_df, duration_col="PFS_Months", event_col="Progression_Event")
             return cph, model_df, feature_cols
         except Exception:
             return None, model_df, feature_cols
 
 
 def bootstrap_c_index(source_df: pd.DataFrame, include_kinetics: bool = False, n_boot: int = 100, seed: int = 42):
-    """Internal bootstrap stability interval for the C-index when feasible."""
     rng = np.random.default_rng(seed)
     n = len(source_df)
     if n < 15:
         return np.nan, np.nan, np.nan
 
-    c_indexes = []
+    values = []
     for _ in range(n_boot):
-        idx = rng.integers(0, n, size=n)
-        boot = source_df.iloc[idx].reset_index(drop=True)
+        boot = source_df.iloc[rng.integers(0, n, size=n)].reset_index(drop=True)
         cph, model_df, cols = fit_cox_design(boot, include_kinetics=include_kinetics)
-        if cph is None or not cols:
-            continue
-        try:
-            pred = cph.predict_partial_hazard(model_df[cols])
-            concordance = cph.concordance_index_
-            if np.isfinite(concordance):
-                c_indexes.append(float(concordance))
-        except Exception:
-            continue
+        if cph is not None and cols:
+            value = getattr(cph, "concordance_index_", np.nan)
+            if np.isfinite(value):
+                values.append(float(value))
 
-    if len(c_indexes) < 5:
+    if len(values) < 5:
         return np.nan, np.nan, np.nan
-    arr = np.asarray(c_indexes)
-    return float(np.median(arr)), float(np.quantile(arr, 0.025)), float(np.quantile(arr, 0.975))
+    arr = np.asarray(values)
+    return float(np.median(arr)), float(np.quantile(arr, .025)), float(np.quantile(arr, .975))
+
+
+def compute_empirical_cui(source_df: pd.DataFrame, coefficients=None, baseline: float = 50.0):
+    """Optional empirical calibration layered over the mechanistic TC-KUO v3 index."""
+    out = source_df.copy()
+    mechanistic = pd.to_numeric(out["Dynamic_CUI"], errors="coerce").fillna(0.0)
+    out["Mechanistic_CUI"] = mechanistic
+
+    if coefficients is None:
+        out["Calibrated_CUI"] = mechanistic
+        out["CUI_Calibration"] = "Mechanistic TC-KUO v3 research index"
+        return out
+
+    design = build_cox_features(out, include_kinetics=False).reindex(columns=coefficients.index, fill_value=0.0)
+    linear = design.astype(float).fillna(0.0).dot(coefficients.astype(float))
+    calibrated = 100.0 / (1.0 + np.exp(-np.clip(linear, -20, 20)))
+    out["Calibrated_CUI"] = calibrated.astype(float)
+    out["CUI_Calibration"] = "Cohort-derived Cox calibration over TC-KUO v3 state features"
+    out["Calibration_Delta"] = out["Calibrated_CUI"] - mechanistic
+    return out
+
+
+def score_explanation(row):
+    return {
+        "Actionability": float(row.get("Evidence_Strength", 0.0)) * 100.0,
+        "Therapy Match": float(row.get("Therapy_Compatibility", 0.0)),
+        "Resistance Modifier": float(row.get("Tensor_Pairwise_Order", 0.0)),
+        "Host Resilience": float(row.get("Host_State_Field", 0.0)),
+        "Toxicity Modifier": float(row.get("Toxicity_Modifier", 1.0)),
+    }
 
 
 # =========================================================
@@ -153,47 +260,52 @@ data_mode = st.sidebar.radio("Data Source:", ["📂 Upload Custom Cohort", "🔬
 
 @st.cache_data
 def process_dataframe(df):
-    """Normalizes the cohort and executes the transparent CUI feature engine."""
-    df = df.copy()
+    """Normalize the cohort and execute the complete TC-KUO v3 research engine."""
+    df = _prepare_research_schema(df)
 
-    df['PFS_Months'] = safe_numeric_column(df, 'PFS_Months', np.nan)
-    df['Progression_Event'] = safe_numeric_column(df, 'Progression_Event', np.nan)
-    df['Tumor_Fraction'] = safe_numeric_column(df, 'Tumor_Fraction', 0.05).clip(lower=0.0001)
+    df["PFS_Months"] = safe_numeric_column(df, "PFS_Months", np.nan)
+    df["Progression_Event"] = safe_numeric_column(df, "Progression_Event", np.nan)
+    df["Tumor_Fraction"] = safe_numeric_column(df, "Tumor_Fraction", np.nan)
+    df = df.dropna(subset=["PFS_Months", "Progression_Event"]).copy()
 
-    df = df.dropna(subset=['PFS_Months', 'Progression_Event']).copy()
+    if "Cohort" not in df.columns:
+        df["Cohort"] = "General Cohort"
+    if "Therapy_Type" not in df.columns:
+        df["Therapy_Type"] = "Standard Care"
+    if "SII" not in df.columns:
+        df["SII"] = np.nan
+    if "AST" not in df.columns:
+        df["AST"] = np.nan
+    if "ALT" not in df.columns:
+        df["ALT"] = np.nan
+    if "Age" not in df.columns:
+        df["Age"] = np.nan
+    if "Tumor_Fraction_Followup" not in df.columns:
+        df["Tumor_Fraction_Followup"] = np.nan
 
-    if 'Cohort' not in df.columns:
-        df['Cohort'] = 'General Cohort'
-    if 'KRAS_Mutant' not in df.columns:
-        df['KRAS_Mutant'] = 'No'
-    if 'TP53_Mutant' not in df.columns:
-        df['TP53_Mutant'] = 'No'
-    if 'Therapy_Type' not in df.columns:
-        df['Therapy_Type'] = 'Standard Care'
+    for col in ["KRAS_Mutant", "TP53_Mutant", "Therapy_Type", "Cohort"]:
+        df[col] = df[col].astype(str).str.strip()
 
-    for col in ['KRAS_Mutant', 'TP53_Mutant', 'Therapy_Type', 'Cohort']:
-        df[col] = df[col].astype(str).str.strip().str.title()
+    for col in [
+        "SII", "AST", "ALT", "Age", "Tumor_Fraction",
+        "Tumor_Fraction_Followup", "Followup_Days",
+        "Treatment_Start_Day", "Followup_Measurement_Day"
+    ]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    if 'SII' not in df.columns:
-        df['SII'] = 500.0
-    if 'AST' not in df.columns:
-        df['AST'] = 25.0
-    if 'ALT' not in df.columns:
-        df['ALT'] = 25.0
-    if 'Age' not in df.columns:
-        df['Age'] = 50.0
-    if 'Tumor_Fraction_Followup' not in df.columns:
-        df['Tumor_Fraction_Followup'] = np.nan
+    # Explicit evidence is preserved. No automatic KRAS-only ESCAT inference is performed.
+    df["Evidence_Tier"] = df["Evidence_Tier"].fillna("Unknown")
+    df["ESCAT_Tier"] = df["Evidence_Tier"]
 
-    for col, default in [('SII', 500.0), ('AST', 25.0), ('ALT', 25.0), ('Age', 50.0), ('Tumor_Fraction_Followup', np.nan)]:
-        df[col] = pd.to_numeric(df[col], errors='coerce')
-        if np.isfinite(default):
-            df[col] = df[col].fillna(default)
-
-    df['ESCAT_Tier'] = df.apply(assign_escat_tier, axis=1)
+    df = split_temporal_roles(df)
     df = derive_feature_frame(df)
-    # Preserve the original public score column name.
-    df['VMTB_Matching_Score'] = df['Dynamic_CUI'].round(1)
+
+    # Backward-compatible public columns retained for the original application.
+    df["VMTB_Matching_Score"] = df["Dynamic_CUI"].round(1)
+    df["Actionability_Points"] = pd.to_numeric(df["Evidence_Strength"], errors="coerce").fillna(0) * 100
+    df["Therapy_Match"] = df["Therapy_Compatibility"]
+    df["TP53_Resistance_Base"] = 1.0 - 0.25 * pd.to_numeric(df["TP53_State"], errors="coerce").fillna(0)
+    df["Phi_Host"] = df["Host_State_Field"]
     return df
 
 
@@ -312,6 +424,11 @@ col2.metric("Median PFS", f"{filtered_df['PFS_Months'].median():.1f} Mo")
 col3.metric("Targeted Therapy Rate", f"{matched_rate}%")
 col4.metric("Mean Clinical Utility (CUI)", f"{filtered_df['Calibrated_CUI'].mean():.1f}")
 st.markdown("---")
+st.info(
+    f"🧪 **Research Use Only — {MODEL_ID} / {ENGINE_ID} v{ARCHITECTURE_VERSION}.** "
+    "CUI is a bounded research utility index, not a probability, diagnosis, prognosis, "
+    "treatment recommendation, or clinical decision rule. Evidence tiers are externally curated."
+)
 
 # =========================================================
 # 5. Tabbed Analytical Interface — preserved exactly
@@ -355,7 +472,7 @@ with tab_surv:
                 kmf.plot_survival_function(ax=ax_km, color='gray', linestyle='--', alpha=0.6)
 
         ax_km.set_title("Survival Probability vs. Baselines", fontsize=12)
-        ax_km.set_xlabel("Progression-Free Interval (Months)")
+    ax_km.set_xlabel("Progression-Free Interval (Months)")
         ax_km.set_ylabel("Probability of PFS $S(t)$")
         ax_km.grid(axis='y', linestyle='--', alpha=0.5)
 
@@ -426,8 +543,8 @@ with tab_cph:
 # TAB 3: Interactive Nomogram — host/tumor variables are real predictors
 # =========================================================
 with tab_nomogram:
-    st.subheader("Point-of-Care Predictive Nomogram")
-    st.markdown("Translates the cohort's multivariable regression into an individualized prediction curve, adjusted for host state, toxicity and explicit genomic interactions.")
+    st.subheader("Interactive Research Nomogram")
+    st.markdown("Translates the cohort's fitted statistical model into an exploratory research curve; it is not a point-of-care or treatment-decision tool.")
 
     col_n1, col_n2 = st.columns([1, 2])
     with col_n1:
@@ -467,7 +584,6 @@ with tab_nomogram:
             if baseline_cph is None or len(baseline_cols) == 0:
                 st.info("⚠️ Insufficient cohort variance to construct a cohort-derived predictive nomogram for this filter.")
             else:
-                # Build patient design with the same transformations used by the fitted cohort model.
                 tmp = pd.DataFrame([{
                     'Therapy_Type': pt_therapy,
                     'KRAS_Mutant': pt_kras,
@@ -501,7 +617,6 @@ with tab_nomogram:
                 ax_nomo.set_ylabel("Probability")
                 ax_nomo.grid(True, linestyle='--', alpha=0.5)
 
-                # Dynamic on-treatment update is shown separately from baseline prognosis.
                 if dynamic_cph is not None:
                     st.caption("Dynamic ctDNA updating is available for cohorts with sufficient observed follow-up kinetics and is intentionally kept distinct from the baseline curve.")
                 st.pyplot(fig_nomo)
@@ -535,8 +650,8 @@ with tab_vmtb:
 
     st.markdown("#### CUI Component Attribution")
     attribution_cols = [
-        'Actionability_Points', 'Therapy_Match', 'TP53_Resistance_Base',
-        'Phi_Host', 'Toxicity_Modifier', 'K_Clearance', 'Baseline_CUI',
+        'Evidence_Strength', 'Therapy_Compatibility', 'Tensor_Pairwise_Order',
+        'Host_State_Field', 'Measurement_Quality', 'Effective_Kinetic_State', 'Baseline_CUI',
         'Dynamic_CUI', 'Calibrated_CUI'
     ]
     st.dataframe(filtered_df[attribution_cols].describe().T.round(3), use_container_width=True)
@@ -558,14 +673,30 @@ with tab_mrd:
     fig_mrd.add_hline(y=0.01, line_dash="dash", line_color="red", annotation_text="superRCA LOD (0.01%)")
     st.plotly_chart(fig_mrd, use_container_width=True)
 
-    observed_kin = filtered_df[filtered_df['K_Observed'] > 0].copy()
+    st.markdown("#### Multi-timepoint trajectory analysis")
+    st.caption(
+        "Optional research analysis. Enter ordered measurements as day:fraction, comma-separated "
+        "(example: 0:0.08,30:0.04,60:0.06). Trajectory descriptors are not clinical resistance labels."
+    )
+    trajectory_text = st.text_input("Patient trajectory (optional)", value="", key="trajectory_input")
+    if trajectory_text.strip():
+        try:
+            pairs = []
+            for token in trajectory_text.split(","):
+                day, frac = token.strip().split(":")
+                pairs.append((float(day), float(frac)))
+            traj = compute_longitudinal_patient_state(pairs)
+            st.dataframe(pd.DataFrame([traj]).T.rename(columns={0: "Value"}), use_container_width=True)
+        except Exception as exc:
+            st.warning(f"Trajectory could not be parsed: {exc}")
+
+    observed_kin = filtered_df[filtered_df['Kinetic_Observed'] > 0].copy()
     if len(observed_kin) > 0:
         st.markdown("#### Longitudinal Molecular Update")
         st.dataframe(
             observed_kin[[
                 'Tumor_Fraction', 'Tumor_Fraction_Followup',
-                'ctDNA_Log_Ratio', 'ctDNA_Relative_Change',
-                'K_Clearance', 'K_Status', 'Dynamic_CUI'
+                'Effective_Kinetic_State', 'Dynamic_CUI'
             ]].round(4),
             use_container_width=True
         )
@@ -595,10 +726,10 @@ with tab_mut:
                 st.pyplot(fig_heat)
                 plt.close(fig_heat)
 
-            if baseline_cph is not None and 'KRAS_x_TP53' in baseline_cph.params_.index:
-                interaction_coef = baseline_cph.params_['KRAS_x_TP53']
+            if baseline_cph is not None and 'Tensor_Pairwise_Order' in baseline_cph.params_.index:
+                interaction_coef = baseline_cph.params_['Tensor_Pairwise_Order']
                 interaction_hr = np.exp(interaction_coef)
-                st.metric("Estimated KRAS×TP53 Interaction HR", f"{interaction_hr:.2f}")
+                st.metric("Estimated Interaction HR", f"{interaction_hr:.2f}")
                 st.caption("This is an empirical statistical interaction term; it is not treated as mechanistic epistasis by the software unless independently established.")
         else:
             st.info("Insufficient variance to compute 2x2 matrix.")
@@ -609,8 +740,8 @@ with tab_mut:
 # TAB 7: Decision Pathway — original structure, refined semantics
 # =========================================================
 with tab_pathway:
-    st.subheader("Dynamic Clinical Decision & Actionability Pathway")
-    st.markdown("Automated algorithmic flowchart mapping genomic tiering through host-tumor metabolic modulation, toxicity, and longitudinal molecular kinetics.")
+    st.subheader("Dynamic Research State & Actionability Pathway")
+    st.markdown("Research-state flowchart mapping curated evidence, therapy compatibility, genomic interaction, host state, assay quality, and longitudinal molecular kinetics.")
 
     tier_counts = filtered_df['ESCAT_Tier'].value_counts()
     t12_count = tier_counts.get('Tier I', 0) + tier_counts.get('Tier II', 0)
@@ -688,6 +819,13 @@ with tab_data:
     table_1_df = pd.DataFrame(table_1_data)
     st.table(table_1_df)
 
+    st.markdown("#### TC-KUO v3 Research Architecture & Provenance")
+    st.json(model_metadata(DEFAULT_PARAMETERS))
+    st.caption(
+        "The export retains parameter fingerprinting, temporal provenance, observed-component fraction, "
+        "measurement quality, and separate baseline/dynamic utility fields."
+    )
+
     st.markdown("#### Model Provenance")
     provenance = pd.DataFrame({
         'Element': [
@@ -695,12 +833,12 @@ with tab_data:
             'Toxicity', 'ctDNA kinetic update', 'Calibration layer'
         ],
         'Implementation': [
-            'Supported-cohort ESCAT-inspired mapping',
-            'TP53 term + empirical KRAS×TP53 interaction',
-            'Continuous SII / De Ritis / age transforms',
-            'Continuous bounded exponential modifier',
-            'Baseline-to-follow-up ctDNA log-ratio',
-            'Penalized Cox coefficients + mechanistic CUI hybrid when stable'
+            'Externally curated evidence tier; no KRAS-only inference',
+            'Sparse first-/second-/third-order genomic interaction tensor',
+            'Continuous host-state field with explicit missingness',
+            'Host-state + assay-quality measurement modifiers',
+            'Pairwise + longitudinal ctDNA kinetics with temporal provenance',
+            'Optional penalized Cox calibration over v3 state variables'
         ]
     })
     st.dataframe(provenance, use_container_width=True)
