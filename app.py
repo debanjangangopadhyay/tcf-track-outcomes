@@ -49,21 +49,26 @@ data_mode = st.sidebar.radio("Data Source:", ["📂 Upload Custom Cohort", "🔬
 
 @st.cache_data
 def process_dataframe(df):
-    """Applies clinical algorithms ensuring metabolic defaults exist."""
+    """Applies clinical algorithms ensuring metabolic, kinetic, and toxicity defaults exist."""
     df['PFS_Months'] = pd.to_numeric(df.get('PFS_Months', 0), errors='coerce')
     df['Progression_Event'] = pd.to_numeric(df.get('Progression_Event', 0), errors='coerce')
     df = df.dropna(subset=['PFS_Months', 'Progression_Event'])
     
+    # Genomic & Baseline Defaults
     if 'Tumor_Fraction' not in df.columns: df['Tumor_Fraction'] = 0.05
     if 'Cohort' not in df.columns: df['Cohort'] = 'General Cohort'
     if 'KRAS_Mutant' not in df.columns: df['KRAS_Mutant'] = 'No'
     if 'TP53_Mutant' not in df.columns: df['TP53_Mutant'] = 'No'
     if 'Therapy_Type' not in df.columns: df['Therapy_Type'] = 'Standard Care'
     
+    # Metabolic, Toxicity & Kinetic Defaults
     if 'SII' not in df.columns: df['SII'] = 500.0
     if 'AST' not in df.columns: df['AST'] = 25.0
     if 'ALT' not in df.columns: df['ALT'] = 25.0
+    if 'Age' not in df.columns: df['Age'] = 50.0
+    if 'Tumor_Fraction_Followup' not in df.columns: df['Tumor_Fraction_Followup'] = np.nan
     
+    # Execute the updated CUI Mathematical Engine
     df['ESCAT_Tier'] = df.apply(assign_escat_tier, axis=1)
     df['VMTB_Matching_Score'] = df.apply(calculate_vmtb_score, axis=1)
     return df
@@ -83,19 +88,24 @@ if data_mode == "📂 Upload Custom Cohort":
         cols = ["Not Available"] + list(raw_upload.columns)
         def get_idx(col_name): return cols.index(col_name) if col_name in cols else 0
         
+        # UI Mappers
         map_pfs = st.sidebar.selectbox("PFS (Months)", cols, index=get_idx('PFS_Months'))
         map_evt = st.sidebar.selectbox("Progression Event", cols, index=get_idx('Progression_Event'))
         map_tx = st.sidebar.selectbox("Therapy Administered", cols, index=get_idx('Therapy_Type'))
         map_coh = st.sidebar.selectbox("Cancer Cohort", cols, index=get_idx('Cohort'))
         map_kras = st.sidebar.selectbox("KRAS Status", cols, index=get_idx('KRAS_Mutant'))
         map_tp53 = st.sidebar.selectbox("TP53 Status", cols, index=get_idx('TP53_Mutant'))
-        map_ast = st.sidebar.selectbox("AST Level (Metabolic)", cols, index=get_idx('AST'))
+        
+        st.sidebar.markdown("#### Host-Tumor Modifiers")
+        map_ast = st.sidebar.selectbox("AST Level (MASLD Proxy)", cols, index=get_idx('AST'))
+        map_age = st.sidebar.selectbox("Patient Age (Toxicity)", cols, index=get_idx('Age'))
+        map_followup = st.sidebar.selectbox("Follow-up ctDNA % (Kinetics)", cols, index=get_idx('Tumor_Fraction_Followup'))
         
         if st.sidebar.button("Process & Analyze Data"):
             rename_dict = {}
             for map_val, target in zip(
-                [map_pfs, map_evt, map_tx, map_coh, map_kras, map_tp53, map_ast],
-                ['PFS_Months', 'Progression_Event', 'Therapy_Type', 'Cohort', 'KRAS_Mutant', 'TP53_Mutant', 'AST']
+                [map_pfs, map_evt, map_tx, map_coh, map_kras, map_tp53, map_ast, map_age, map_followup],
+                ['PFS_Months', 'Progression_Event', 'Therapy_Type', 'Cohort', 'KRAS_Mutant', 'TP53_Mutant', 'AST', 'Age', 'Tumor_Fraction_Followup']
             ):
                 if map_val != "Not Available": rename_dict[map_val] = target
                 
@@ -132,7 +142,7 @@ total_patients = len(filtered_df)
 if total_patients == 0:
     st.warning("No patients match current filter parameters.")
     st.stop()
-
+    
 # =========================================================
 # 3. Header Metrics
 # =========================================================
