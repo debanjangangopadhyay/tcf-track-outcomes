@@ -472,7 +472,7 @@ with tab_surv:
                 kmf.plot_survival_function(ax=ax_km, color='gray', linestyle='--', alpha=0.6)
 
         ax_km.set_title("Survival Probability vs. Baselines", fontsize=12)
-    ax_km.set_xlabel("Progression-Free Interval (Months)")
+        ax_km.set_xlabel("Progression-Free Interval (Months)")
         ax_km.set_ylabel("Probability of PFS $S(t)$")
         ax_km.grid(axis='y', linestyle='--', alpha=0.5)
 
