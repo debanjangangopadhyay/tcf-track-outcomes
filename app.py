@@ -400,4 +400,7 @@ with tab_data:
         ]
     }
     table_1_df = pd.DataFrame(table_1_data)
-    st.table(table_1_d
+    st.table(table_1_df)
+    csv_buffer = io.BytesIO()
+    table_1_df.to_csv(csv_buffer, index=False)
+    st.download_button("📥 Download Table 1 (CSV)", data=csv_buffer.getvalue(), file_name="Table1_Baseline_Characteristics.csv", mime="text/csv")
