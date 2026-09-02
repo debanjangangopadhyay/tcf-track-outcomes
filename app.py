@@ -51,17 +51,23 @@ data_mode = st.sidebar.radio("Data Source:", ["📂 Upload Custom Cohort", "🔬
 
 @st.cache_data
 def process_dataframe(df):
-    """Applies clinical algorithms ensuring metabolic, kinetic, and toxicity defaults exist."""
-    df['PFS_Months'] = pd.to_numeric(df.get('PFS_Months', 0), errors='coerce')
-    df['Progression_Event'] = pd.to_numeric(df.get('Progression_Event', 0), errors='coerce')
+    """Applies clinical algorithms ensuring safe ingestion of messy real-world data."""
+    # BUG 4 FIX: Strictly coerce numerical columns to float, dropping strings/symbols for Log-Scale
+    df['PFS_Months'] = pd.to_numeric(df.get('PFS_Months'), errors='coerce')
+    df['Progression_Event'] = pd.to_numeric(df.get('Progression_Event'), errors='coerce')
+    df['Tumor_Fraction'] = pd.to_numeric(df.get('Tumor_Fraction', 0.05), errors='coerce').fillna(0.05)
+    
     df = df.dropna(subset=['PFS_Months', 'Progression_Event'])
     
     # Genomic & Baseline Defaults
-    if 'Tumor_Fraction' not in df.columns: df['Tumor_Fraction'] = 0.05
     if 'Cohort' not in df.columns: df['Cohort'] = 'General Cohort'
     if 'KRAS_Mutant' not in df.columns: df['KRAS_Mutant'] = 'No'
     if 'TP53_Mutant' not in df.columns: df['TP53_Mutant'] = 'No'
     if 'Therapy_Type' not in df.columns: df['Therapy_Type'] = 'Standard Care'
+    
+    # BUG 2 FIX: Aggressively normalize categorical strings to prevent matching failures
+    for col in ['KRAS_Mutant', 'TP53_Mutant', 'Therapy_Type', 'Cohort']:
+        df[col] = df[col].astype(str).str.strip().str.title()
     
     # Metabolic, Toxicity & Kinetic Defaults
     if 'SII' not in df.columns: df['SII'] = 500.0
@@ -105,16 +111,20 @@ if data_mode == "📂 Upload Custom Cohort":
         map_followup = st.sidebar.selectbox("Follow-up ctDNA % (Kinetics)", cols, index=get_idx('Tumor_Fraction_Followup'))
         
         if st.sidebar.button("Process & Analyze Data"):
-            rename_dict = {}
-            for map_val, target in zip(
-                [map_pfs, map_evt, map_tx, map_coh, map_kras, map_tp53, map_ast, map_age, map_followup],
-                ['PFS_Months', 'Progression_Event', 'Therapy_Type', 'Cohort', 'KRAS_Mutant', 'TP53_Mutant', 'AST', 'Age', 'Tumor_Fraction_Followup']
-            ):
-                if map_val != "Not Available": rename_dict[map_val] = target
-                
-            mapped_df = raw_upload.rename(columns=rename_dict)
-            raw_df = process_dataframe(mapped_df)
-            st.session_state['mapped_df'] = raw_df
+            # BUG 3 FIX: Enforce required survival schema mapping
+            if map_pfs == "Not Available" or map_evt == "Not Available":
+                st.sidebar.error("❌ Critical: You MUST map 'PFS (Months)' and 'Progression Event' to run survival analytics.")
+            else:
+                rename_dict = {}
+                for map_val, target in zip(
+                    [map_pfs, map_evt, map_tx, map_coh, map_kras, map_tp53, map_ast, map_age, map_followup],
+                    ['PFS_Months', 'Progression_Event', 'Therapy_Type', 'Cohort', 'KRAS_Mutant', 'TP53_Mutant', 'AST', 'Age', 'Tumor_Fraction_Followup']
+                ):
+                    if map_val != "Not Available": rename_dict[map_val] = target
+                    
+                mapped_df = raw_upload.rename(columns=rename_dict)
+                raw_df = process_dataframe(mapped_df)
+                st.session_state['mapped_df'] = raw_df
         elif 'mapped_df' in st.session_state:
             raw_df = st.session_state['mapped_df']
         else:
@@ -214,16 +224,23 @@ with tab_cph:
     st.subheader("Multivariable Cox Proportional Hazards Regression")
     cph_df = filtered_df[['PFS_Months', 'Progression_Event', 'Therapy_Type']].copy()
     cph_df['Is_Matched'] = (cph_df['Therapy_Type'] == 'Targeted/Matched').astype(int)
-    cph_df.drop(columns=['Therapy_Type'], inplace=True)
     
     if 'KRAS_Mutant' in filtered_df.columns:
         cph_df['KRAS_Mut'] = (filtered_df['KRAS_Mutant'] == 'Yes').astype(int)
     if 'TP53_Mutant' in filtered_df.columns:
         cph_df['TP53_Mut'] = (filtered_df['TP53_Mutant'] == 'Yes').astype(int)
 
+    # BUG 1 FIX: Dynamically drop zero-variance columns to prevent lifelines ConvergenceError
+    valid_cols = ['PFS_Months', 'Progression_Event']
+    if cph_df['Is_Matched'].nunique() > 1: valid_cols.append('Is_Matched')
+    if 'KRAS_Mut' in cph_df.columns and cph_df['KRAS_Mut'].nunique() > 1: valid_cols.append('KRAS_Mut')
+    if 'TP53_Mut' in cph_df.columns and cph_df['TP53_Mut'].nunique() > 1: valid_cols.append('TP53_Mut')
+    
+    cph_df_clean = cph_df[valid_cols].copy()
+
     try:
         cph = CoxPHFitter()
-        cph.fit(cph_df, duration_col='PFS_Months', event_col='Progression_Event')
+        cph.fit(cph_df_clean, duration_col='PFS_Months', event_col='Progression_Event')
         
         col_cph1, col_cph2 = st.columns([1.2, 1])
         with col_cph1:
@@ -240,7 +257,7 @@ with tab_cph:
             summary_table.columns = ['Covariate', 'Log-Hazard', 'Hazard Ratio', 'Std Error', 'p-value']
             st.dataframe(summary_table.style.format({'Log-Hazard': '{:.3f}', 'Hazard Ratio': '{:.3f}', 'Std Error': '{:.3f}', 'p-value': '{:.4e}'}), use_container_width=True)
     except Exception as e:
-        st.warning(f"Cox PH model requires more event diversity to converge. Error: {e}")
+        st.warning(f"Cox PH model requires more event diversity to converge. Ensure selected cohort has adequate variance. Error: {e}")
 
 # --- TAB 3: Interactive Nomogram ---
 with tab_nomogram:
@@ -263,16 +280,24 @@ with tab_nomogram:
             pred_df['Is_Matched'] = (pred_df['Therapy_Type'] == 'Targeted/Matched').astype(int)
             pred_df['KRAS_Mut'] = (pred_df['KRAS_Mutant'] == 'Yes').astype(int)
             pred_df['TP53_Mut'] = (pred_df['TP53_Mutant'] == 'Yes').astype(int)
-            pred_df = pred_df[['PFS_Months', 'Progression_Event', 'Is_Matched', 'KRAS_Mut', 'TP53_Mut']]
+            
+            # BUG 1 FIX: Dynamically drop zero-variance columns to prevent lifelines ConvergenceError
+            valid_cols_pred = ['PFS_Months', 'Progression_Event']
+            if pred_df['Is_Matched'].nunique() > 1: valid_cols_pred.append('Is_Matched')
+            if pred_df['KRAS_Mut'].nunique() > 1: valid_cols_pred.append('KRAS_Mut')
+            if pred_df['TP53_Mut'].nunique() > 1: valid_cols_pred.append('TP53_Mut')
+            
+            pred_df_clean = pred_df[valid_cols_pred].copy()
             
             cph_pred = CoxPHFitter()
-            cph_pred.fit(pred_df, duration_col='PFS_Months', event_col='Progression_Event')
+            cph_pred.fit(pred_df_clean, duration_col='PFS_Months', event_col='Progression_Event')
             
-            pt_data = pd.DataFrame({
-                'Is_Matched': [1 if pt_therapy == "Targeted/Matched" else 0],
-                'KRAS_Mut': [1 if pt_kras == "Yes" else 0],
-                'TP53_Mut': [1 if pt_tp53 == "Yes" else 0]
-            })
+            # Construct patient data strictly matching the fitted columns
+            pt_dict = {}
+            if 'Is_Matched' in valid_cols_pred: pt_dict['Is_Matched'] = [1 if pt_therapy == "Targeted/Matched" else 0]
+            if 'KRAS_Mut' in valid_cols_pred: pt_dict['KRAS_Mut'] = [1 if pt_kras == "Yes" else 0]
+            if 'TP53_Mut' in valid_cols_pred: pt_dict['TP53_Mut'] = [1 if pt_tp53 == "Yes" else 0]
+            pt_data = pd.DataFrame(pt_dict)
             
             pt_survival = cph_pred.predict_survival_function(pt_data)
             
@@ -293,7 +318,7 @@ with tab_nomogram:
             render_download_button(fig_nomo, "Patient_Survival_Nomogram", key="nomo")
             plt.close(fig_nomo)
         except Exception as e:
-            st.warning("Insufficient cohort variance to fit the predictive nomogram.")
+            st.warning(f"Insufficient cohort variance to fit the predictive nomogram. Error: {e}")
 
 # --- TAB 4: ESCAT & CUI ---
 with tab_vmtb:
@@ -357,7 +382,7 @@ with tab_pathway:
     t12_count = tier_counts.get('Tier I', 0) + tier_counts.get('Tier II', 0)
     t12_pct = round((t12_count / total_patients) * 100, 1) if total_patients else 0
     t34_pct = round(100 - t12_pct, 1)
-    
+
     tp53_count = len(filtered_df[filtered_df['TP53_Mutant'] == 'Yes'])
     epistasis_pct = round((tp53_count / total_patients) * 100, 1) if total_patients else 0
 
@@ -421,3 +446,4 @@ with tab_data:
     csv_buffer = io.BytesIO()
     table_1_df.to_csv(csv_buffer, index=False)
     st.download_button("📥 Download Table 1 (CSV)", data=csv_buffer.getvalue(), file_name="Table1_Baseline_Characteristics.csv", mime="text/csv")
+    
