@@ -453,7 +453,7 @@ def derive_feature_frame(df: pd.DataFrame, parameters: TCFTParameters = DEFAULT_
         
     results_df = pd.DataFrame(results, index=out.index)
     
-    # NEW LOGIC: Drop overlapping columns from the original DataFrame
+    # STRUCTURAL FIX: Drop overlapping columns to prevent Narwhals strict duplication errors
     overlap = [col for col in results_df.columns if col in out.columns]
     out = out.drop(columns=overlap)
     
@@ -521,3 +521,4 @@ def run_self_checks() -> Dict[str, Any]:
     baseline = compute_baseline_state(evidence_tier="Tier I", therapy_match_type="Matched", kras_state=1, tp53_state=1, sii=500, ast=25, alt=25, age=50)
     checks["baseline_mode"] = baseline["Kinetic_Observed"] == 0 and baseline["Utility_State"] == "Baseline_No_Eligible_Kinetics"
     return {"all_passed": bool(all(checks.values())), "checks": checks}
+  
