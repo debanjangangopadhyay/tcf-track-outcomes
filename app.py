@@ -134,7 +134,8 @@ def build_cox_features(source_df: pd.DataFrame, include_kinetics: bool = False) 
     design["Age_z"] = z("Age")
 
     if include_kinetics:
-        for col in ["ctDNA_Log_Ratio", "Effective_Kinetic_State", "Kinetic_Observed"]:
+        # STRUCTURAL FIX: Align feature call with engine's kinetic outputs
+        for col in ["Kinetic_Velocity_30d_Used", "Effective_Kinetic_State", "Kinetic_Observed"]:
             design[col] = safe_get_series(d, col)
 
     return design.replace([np.inf, -np.inf], np.nan)
@@ -240,6 +241,9 @@ def process_dataframe(df):
     df["Therapy_Match"] = safe_numeric_column(df, "Therapy_Compatibility", 0.3)
     df["TP53_Resistance_Base"] = 1.0 - 0.25 * safe_numeric_column(df, "TP53_State", 0.0)
     df["Phi_Host"] = safe_numeric_column(df, "Host_State_Field", 1.0)
+    
+    # Bulletproof column duplication check
+    df = df.loc[:, ~df.columns.duplicated()]
     return df
 
 
@@ -325,9 +329,10 @@ if baseline_cph is not None:
 else:
     calibrated_df = compute_empirical_cui(filtered_df, None)
 
-kinetic_observed = safe_numeric_column(calibrated_df, 'K_Observed', 0.0).sum()
+# STRUCTURAL FIX: Use correct logic engine key 'Kinetic_Observed' and correct subset key 'Kinetic_Velocity_30d_Used'
+kinetic_observed = safe_numeric_column(calibrated_df, 'Kinetic_Observed', 0.0).sum()
 if kinetic_observed >= 8:
-    dynamic_cph, dynamic_model_df, dynamic_cols = fit_cox_design(calibrated_df.dropna(subset=['ctDNA_Log_Ratio']), include_kinetics=True)
+    dynamic_cph, dynamic_model_df, dynamic_cols = fit_cox_design(calibrated_df.dropna(subset=['Kinetic_Velocity_30d_Used']), include_kinetics=True)
 else:
     dynamic_cph, dynamic_model_df, dynamic_cols = None, pd.DataFrame(), []
 
@@ -404,8 +409,11 @@ with tab_cph:
             render_download_button(fig_cph, "Cox_PH_Forest_Plot", key="cph")
             plt.close(fig_cph)
         with col_cph2:
-            summary_table = baseline_cph.summary[['coef', 'exp(coef)', 'se(coef)', 'p']].reset_index()
-            summary_table.columns = ['Covariate', 'Log-Hazard', 'Hazard Ratio', 'Std Error', 'p-value']
+            # STRUCTURAL FIX: Enforce correct Log-Hazard to Hazard Ratio calculation to prevent mathematical contradictions
+            summary_table = baseline_cph.summary[['coef', 'se(coef)', 'p']].reset_index()
+            summary_table.columns = ['Covariate', 'Log-Hazard', 'Std Error', 'p-value']
+            summary_table.insert(2, 'Hazard Ratio', np.exp(summary_table['Log-Hazard'].astype(float)))
+            
             st.dataframe(summary_table.style.format({'Log-Hazard': '{:.3f}', 'Hazard Ratio': '{:.3f}', 'Std Error': '{:.3f}', 'p-value': '{:.4e}'}), use_container_width=True)
 
 with tab_nomogram:
@@ -437,6 +445,7 @@ with tab_nomogram:
                 tmp['KRAS_x_TP53'] = tmp['KRAS_Mut'] * tmp['TP53_Mut']
                 tmp['Matched_x_TP53'] = tmp['Is_Matched'] * tmp['TP53_Mut']
                 tmp['SII_z'] = (tmp['SII'] - filtered_df['SII'].mean()) / (filtered_df['SII'].std(ddof=0) or 1.0)
+                # STRUCTURAL FIX: Correct Key 'DeRitis_Ratio'
                 tmp['DeRitis_z'] = (tmp['DeRitis'] - filtered_df['DeRitis_Ratio'].mean()) / (filtered_df['DeRitis_Ratio'].std(ddof=0) or 1.0)
                 tmp['Age_z'] = (tmp['Age'] - filtered_df['Age'].mean()) / (filtered_df['Age'].std(ddof=0) or 1.0)
                 for c in baseline_cols:
@@ -482,11 +491,11 @@ with tab_pathway:
                 label = "1. Genomic & Therapy Interaction";
                 style = "dashed"; color="#0d6efd"; fontcolor="#0d6efd";
                 
-                E [label="Evidence State (E)\nStrength(Tier) × Confidence", fillcolor="#e9ecef"];
-                M [label="Therapy State (M)\nCompatibility Score (0 to 1)", fillcolor="#e9ecef"];
-                T [label="Genomic Tensor (T)\nSigmoid(β_K + β_P + β_M + Pairwise + β_KPM)", fillcolor="#e9ecef"];
+                E [label="Evidence State (E)\\nStrength(Tier) × Confidence", fillcolor="#e9ecef"];
+                M [label="Therapy State (M)\\nCompatibility Score (0 to 1)", fillcolor="#e9ecef"];
+                T [label="Genomic Tensor (T)\\nSigmoid(β_K + β_P + β_M + Pairwise + β_KPM)", fillcolor="#e9ecef"];
                 
-                GU [label="Genomic Utility (GU)\nGU = E × M × T", fillcolor="#cce5ff", shape=oval];
+                GU [label="Genomic Utility (GU)\\nGU = E × M × T", fillcolor="#cce5ff", shape=oval];
                 
                 {E, M, T} -> GU;
             }
@@ -495,17 +504,17 @@ with tab_pathway:
                 label = "2. Host State Field Modifiers";
                 style = "dashed"; color="#198754"; fontcolor="#198754";
                 
-                SII [label="Immune Stress (Φ_SII)\nexp(-w_s × ((SII-ref)/scale)^exp)", fillcolor="#e9ecef"];
-                Hepatic [label="Hepatic Stress (Φ_DeRitis)\nexp(-w_d × ((AST/ALT-ref)/scale)^exp)", fillcolor="#e9ecef"];
-                Age [label="Age Stress (Φ_Age)\nexp(-w_a × ((Age-ref)/scale)^exp)", fillcolor="#e9ecef"];
+                SII [label="Immune Stress (Φ_SII)\\nexp(-w_s × ((SII-ref)/scale)^exp)", fillcolor="#e9ecef"];
+                Hepatic [label="Hepatic Stress (Φ_DeRitis)\\nexp(-w_d × ((AST/ALT-ref)/scale)^exp)", fillcolor="#e9ecef"];
+                Age [label="Age Stress (Φ_Age)\\nexp(-w_a × ((Age-ref)/scale)^exp)", fillcolor="#e9ecef"];
                 
-                Host [label="Host State Field (Φ_H)\nΦ_H = Φ_SII × Φ_DeRitis × Φ_Age × Missingness", fillcolor="#d1e7dd", shape=oval];
+                Host [label="Host State Field (Φ_H)\\nΦ_H = Φ_SII × Φ_DeRitis × Φ_Age × Missingness", fillcolor="#d1e7dd", shape=oval];
                 
                 {SII, Hepatic, Age} -> Host;
             }
 
-            Baseline [label="3. Baseline Raw Utility (U_base)\nU_base = 100 × (GU^w1) × (Φ_H^w2)", fillcolor="#fff3cd", shape=Mrecord];
-            BaseCUI [label="Baseline CUI\n100 × tanh(U_base / 65)", fillcolor="#ffc107", style="filled,rounded", shape=diamond];
+            Baseline [label="3. Baseline Raw Utility (U_base)\\nU_base = 100 × (GU^w1) × (Φ_H^w2)", fillcolor="#fff3cd", shape=Mrecord];
+            BaseCUI [label="Baseline CUI\\n100 × tanh(U_base / 65)", fillcolor="#ffc107", style="filled,rounded", shape=diamond];
 
             GU -> Baseline;
             Host -> Baseline;
@@ -515,20 +524,20 @@ with tab_pathway:
                 label = "4. Dynamic Liquid Biopsy Kinetics";
                 style = "dashed"; color="#dc3545"; fontcolor="#dc3545";
                 
-                Vel [label="Velocity (v)\nv = (ln(f₀) - ln(f₁)) / (Δt / 30)", fillcolor="#e9ecef"];
-                KinState [label="Kinetic State (κ)\nκ = Lower + Range × Sigmoid(slope × v)", fillcolor="#e9ecef"];
-                Qual [label="Measurement Quality (Q)\nMean(Assay Qual, LOD, Replicates)", fillcolor="#e9ecef"];
+                Vel [label="Velocity (v)\\nv = (ln(f₀) - ln(f₁)) / (Δt / 30)", fillcolor="#e9ecef"];
+                KinState [label="Kinetic State (κ)\\nκ = Lower + Range × Sigmoid(slope × v)", fillcolor="#e9ecef"];
+                Qual [label="Measurement Quality (Q)\\nMean(Assay Qual, LOD, Replicates)", fillcolor="#e9ecef"];
                 
-                EffKin [label="Effective Kinetics (κ_eff)\nκ_eff = Q(κ) + (1-Q)(1.0)", fillcolor="#f8d7da", shape=oval];
+                EffKin [label="Effective Kinetics (κ_eff)\\nκ_eff = Q(κ) + (1-Q)(1.0)", fillcolor="#f8d7da", shape=oval];
                 
                 Vel -> KinState;
                 {KinState, Qual} -> EffKin;
             }
 
-            DynRaw [label="5. Dynamic Raw Utility (U_dyn)\nU_dyn = U_base × (κ_eff^w3)", fillcolor="#cff4fc", shape=Mrecord];
-            DynCUI [label="Dynamic CUI\n100 × tanh(U_dyn / 65)", fillcolor="#0dcaf0", style="filled,rounded", shape=diamond];
+            DynRaw [label="5. Dynamic Raw Utility (U_dyn)\\nU_dyn = U_base × (κ_eff^w3)", fillcolor="#cff4fc", shape=Mrecord];
+            DynCUI [label="Dynamic CUI\\n100 × tanh(U_dyn / 65)", fillcolor="#0dcaf0", style="filled,rounded", shape=diamond];
 
-            Baseline -> DynRaw [label=" If post-treatment\n kinetics observed"];
+            Baseline -> DynRaw [label=" If post-treatment\\n kinetics observed"];
             EffKin -> DynRaw;
             DynRaw -> DynCUI;
         }
