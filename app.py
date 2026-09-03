@@ -14,15 +14,8 @@ from lifelines.statistics import logrank_test
 from scipy import stats
 
 from clinical_logic import (
-    assign_escat_tier,
-    calculate_deritis,
-    host_toxicity_components,
-    ctDNA_kinetics,
-    calculate_interaction_terms,
     derive_feature_frame,
-    build_cox_features,
-    compute_empirical_cui,
-    score_explanation,
+    compute_longitudinal_patient_state,
     model_metadata,
     parameter_specification,
     split_temporal_roles,
@@ -35,11 +28,7 @@ from clinical_logic import (
     OUTPUT_SEMANTICS,
 )
 
-st.set_page_config(
-    page_title="TCF-001 TRACK / Precision Oncology Analytics",
-    page_icon="🧬",
-    layout="wide"
-)
+st.set_page_config(page_title="TCF-001 TRACK / Precision Oncology Analytics", page_icon="🧬", layout="wide")
 
 plt.rcParams['font.sans-serif'] = 'DejaVu Sans'
 plt.rcParams['axes.edgecolor'] = '#333333'
@@ -69,7 +58,6 @@ def safe_numeric_column(df: pd.DataFrame, col: str, default: float) -> pd.Series
 
 
 def safe_get_series(df_obj, col_name):
-    """Robust extractor that handles duplicate column names by returning a 1D Series."""
     val = df_obj.get(col_name)
     if val is None:
         return pd.Series(np.nan, index=df_obj.index)
@@ -104,19 +92,13 @@ def _prepare_research_schema(df: pd.DataFrame) -> pd.DataFrame:
         out["ESCAT_Tier"] = out["ESCAT_Tier"].fillna(out["Evidence_Tier"]).astype(str).str.strip()
 
     defaults = {
-        "Evidence_Confidence": np.nan,
-        "Therapy_Match_Strength": np.nan,
-        "Assay_Quality": np.nan,
-        "LOD_Margin": np.nan,
-        "Replicate_Confidence": np.nan,
-        "Treatment_Start_Day": 0.0,
-        "Followup_Measurement_Day": np.nan,
-        "Followup_Days": np.nan,
+        "Evidence_Confidence": np.nan, "Therapy_Match_Strength": np.nan,
+        "Assay_Quality": np.nan, "LOD_Margin": np.nan, "Replicate_Confidence": np.nan,
+        "Treatment_Start_Day": 0.0, "Followup_Measurement_Day": np.nan, "Followup_Days": np.nan,
     }
     for col, default in defaults.items():
         if col not in out.columns:
             out[col] = default
-
     for col in defaults:
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
@@ -221,16 +203,6 @@ def compute_empirical_cui(source_df: pd.DataFrame, coefficients=None, baseline: 
     out["CUI_Calibration"] = "Cohort-derived Cox calibration over TC-KUO v3 state features"
     out["Calibration_Delta"] = out["Calibrated_CUI"] - mechanistic
     return out
-
-
-def score_explanation(row):
-    return {
-        "Actionability": float(row.get("Evidence_Strength", 0.0)) * 100.0,
-        "Therapy Match": float(row.get("Therapy_Compatibility", 0.0)),
-        "Resistance Modifier": float(row.get("Tensor_Pairwise_Order", 0.0)),
-        "Host Resilience": float(row.get("Host_State_Field", 0.0)),
-        "Toxicity Modifier": float(row.get("Toxicity_Modifier", 1.0)),
-    }
 
 
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3022/3022565.png", width=60)
