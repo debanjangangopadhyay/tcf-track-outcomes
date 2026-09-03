@@ -450,8 +450,14 @@ def derive_feature_frame(df: pd.DataFrame, parameters: TCFTParameters = DEFAULT_
             followup_measurement_day=row.get("Followup_Measurement_Day", np.nan), parameters=parameters,
         )
         results.append(res)
-    return pd.concat([out, pd.DataFrame(results, index=out.index)], axis=1)
-
+        
+    results_df = pd.DataFrame(results, index=out.index)
+    
+    # NEW LOGIC: Drop overlapping columns from the original DataFrame
+    overlap = [col for col in results_df.columns if col in out.columns]
+    out = out.drop(columns=overlap)
+    
+    return pd.concat([out, results_df], axis=1)
 
 def compute_longitudinal_patient_state(measurements: Sequence[Tuple[float, float]], assay_quality: Any = np.nan, parameters: TCFTParameters = DEFAULT_PARAMETERS) -> Dict[str, Any]:
     trajectory = longitudinal_trajectory(measurements, parameters=parameters)
