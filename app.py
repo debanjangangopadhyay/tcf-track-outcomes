@@ -437,7 +437,7 @@ with tab_nomogram:
                 tmp['KRAS_x_TP53'] = tmp['KRAS_Mut'] * tmp['TP53_Mut']
                 tmp['Matched_x_TP53'] = tmp['Is_Matched'] * tmp['TP53_Mut']
                 tmp['SII_z'] = (tmp['SII'] - filtered_df['SII'].mean()) / (filtered_df['SII'].std(ddof=0) or 1.0)
-                tmp['DeRitis_z'] = (tmp['DeRitis'] - filtered_df['DeRitis'].mean()) / (filtered_df['DeRitis'].std(ddof=0) or 1.0)
+                tmp['DeRitis_z'] = (tmp['DeRitis'] - filtered_df['DeRitis_Ratio'].mean()) / (filtered_df['DeRitis_Ratio'].std(ddof=0) or 1.0)
                 tmp['Age_z'] = (tmp['Age'] - filtered_df['Age'].mean()) / (filtered_df['Age'].std(ddof=0) or 1.0)
                 for c in baseline_cols:
                     if c not in tmp.columns: tmp[c] = 0.0
@@ -468,9 +468,72 @@ with tab_mut:
         st.write(contingency)
 
 with tab_pathway:
-    st.subheader("Dynamic Clinical Decision & Actionability Pathway")
-    st.markdown("Automated algorithmic flowchart mapping genomic tiering through host-tumor modulation.")
+    st.subheader("TC-KUO v3 Mathematical Architecture Pathway")
+    st.markdown("This flowchart maps the exact deterministic logic and formulas used to calculate the Clinical Utility Index (CUI) within the TC-KUO v3 research engine.")
+    
+    # Generate the mathematically aligned flowchart using Graphviz
+    st.graphviz_chart('''
+        digraph TCKUO {
+            rankdir=TB;
+            node [shape=box, style=filled, fillcolor="#f8f9fa", fontname="Helvetica", color="#343a40", rounded=true];
+            edge [fontname="Helvetica", color="#6c757d"];
 
+            subgraph cluster_genomic {
+                label = "1. Genomic & Therapy Interaction";
+                style = "dashed"; color="#0d6efd"; fontcolor="#0d6efd";
+                
+                E [label="Evidence State (E)\nStrength(Tier) × Confidence", fillcolor="#e9ecef"];
+                M [label="Therapy State (M)\nCompatibility Score (0 to 1)", fillcolor="#e9ecef"];
+                T [label="Genomic Tensor (T)\nSigmoid(β_K + β_P + β_M + Pairwise + β_KPM)", fillcolor="#e9ecef"];
+                
+                GU [label="Genomic Utility (GU)\nGU = E × M × T", fillcolor="#cce5ff", shape=oval];
+                
+                {E, M, T} -> GU;
+            }
+
+            subgraph cluster_host {
+                label = "2. Host State Field Modifiers";
+                style = "dashed"; color="#198754"; fontcolor="#198754";
+                
+                SII [label="Immune Stress (Φ_SII)\nexp(-w_s × ((SII-ref)/scale)^exp)", fillcolor="#e9ecef"];
+                Hepatic [label="Hepatic Stress (Φ_DeRitis)\nexp(-w_d × ((AST/ALT-ref)/scale)^exp)", fillcolor="#e9ecef"];
+                Age [label="Age Stress (Φ_Age)\nexp(-w_a × ((Age-ref)/scale)^exp)", fillcolor="#e9ecef"];
+                
+                Host [label="Host State Field (Φ_H)\nΦ_H = Φ_SII × Φ_DeRitis × Φ_Age × Missingness", fillcolor="#d1e7dd", shape=oval];
+                
+                {SII, Hepatic, Age} -> Host;
+            }
+
+            Baseline [label="3. Baseline Raw Utility (U_base)\nU_base = 100 × (GU^w1) × (Φ_H^w2)", fillcolor="#fff3cd", shape=Mrecord];
+            BaseCUI [label="Baseline CUI\n100 × tanh(U_base / 65)", fillcolor="#ffc107", style="filled,rounded", shape=diamond];
+
+            GU -> Baseline;
+            Host -> Baseline;
+            Baseline -> BaseCUI;
+
+            subgraph cluster_kinetic {
+                label = "4. Dynamic Liquid Biopsy Kinetics";
+                style = "dashed"; color="#dc3545"; fontcolor="#dc3545";
+                
+                Vel [label="Velocity (v)\nv = (ln(f₀) - ln(f₁)) / (Δt / 30)", fillcolor="#e9ecef"];
+                KinState [label="Kinetic State (κ)\nκ = Lower + Range × Sigmoid(slope × v)", fillcolor="#e9ecef"];
+                Qual [label="Measurement Quality (Q)\nMean(Assay Qual, LOD, Replicates)", fillcolor="#e9ecef"];
+                
+                EffKin [label="Effective Kinetics (κ_eff)\nκ_eff = Q(κ) + (1-Q)(1.0)", fillcolor="#f8d7da", shape=oval];
+                
+                Vel -> KinState;
+                {KinState, Qual} -> EffKin;
+            }
+
+            DynRaw [label="5. Dynamic Raw Utility (U_dyn)\nU_dyn = U_base × (κ_eff^w3)", fillcolor="#cff4fc", shape=Mrecord];
+            DynCUI [label="Dynamic CUI\n100 × tanh(U_dyn / 65)", fillcolor="#0dcaf0", style="filled,rounded", shape=diamond];
+
+            Baseline -> DynRaw [label=" If post-treatment\n kinetics observed"];
+            EffKin -> DynRaw;
+            DynRaw -> DynCUI;
+        }
+    ''')
+    
 with tab_data:
     st.subheader("Cohort Dataset & Table 1 Summary")
     st.dataframe(filtered_df, use_container_width=True)
